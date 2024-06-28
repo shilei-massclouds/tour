@@ -4,7 +4,12 @@
 
 ### 第一节 宏内核系统构成
 
-顶级(一级)子系统和二级子系统
+宏内核系统对外提供两方面交互服务：
+
+1. 响应外部的中断、异常和系统调用（syscall通常是异常的一类）
+2. 在启动阶段，从存储介质取出默认的应用程序文件，作为首个用户态应用启动
+
+宏内核系统不含功能组件，直接由rt_macrokernel组织两个子系统trap和userboot构成系统，它们分别支持上述两个对外服务。
 
 <img src="./README.assets/image-20240623103331244.png" alt="image-20240623103331244" style="zoom:80%;" />
 
@@ -328,7 +333,19 @@ Priv: 1; Virt: 0
 
 ### 第二节 本章实验安排
 
-XXX
+实验1.1：支持输出信息到屏幕，让内核具备最基础的调试能力。
+
+实验1.2：增加动态内存分配机制，为Rust的alloc库提供内存分配支持，并为内核提供按页分配服务。
+
+实验1.3：重建系统的地址空间，内核支持动态页表映射。
+
+实验1.4：增加PFlash组件，支持从设备直接加载外部应用到指定内存区域。
+
+实验1.5：通过构建异常上下文，让应用返回到用户态运行。
+
+实验1.6：内核支持ebreak异常和自定义系统调用处理，并能够响应时钟中断。
+
+<img src="./README.assets/image-20240628095642763.png" alt="image-20240628095642763" style="zoom:80%;" />
 
 ### 第三节 实验1.1 - 控制台输出和系统日志
 
@@ -363,14 +380,14 @@ sbi-rt = { version = "0.0.2", features = ["legacy"] }
 步骤：
 
 ```sh
-lk chroot rt_early_console
+lk chroot rt_tour_1_1
 lk run
 ```
 
 结果：从屏幕输出如下字符串
 
 ```sh
-[rt_early_console]: ok!
+[rt_tour_1_1]: ok!
 ```
 
 证明功能运行成功！
@@ -569,7 +586,8 @@ error: no global memory allocator found but one is required; link to std or add 
 实验步骤：
 
 ```sh
-lk chroot rt_axalloc
+lk chroot rt_tour_1_2
+lk prepare
 lk run
 ```
 
@@ -578,11 +596,11 @@ lk run
 在执行axalloc::init()之后，可以使用rust的复合类型String，以及直接提出页分配的请求。如下
 
 ```sh
-[  0.046978 axalloc:250]   use TLSF allocator.
-[  0.048226 axalloc:213] initialize global allocator at: [0xffffffc08026b000, 0xffffffc088000000)
-[  0.051826 rt_axalloc:19] Alloc string: Hello, axalloc!
-[  0.052418 rt_axalloc:20] [rt_axalloc]: ok!
-[  0.052944 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+[  0.044782 axalloc:250]   use TLSF allocator.
+[  0.045994 axalloc:213] initialize global allocator at: [0xffffffc08026b000, 0xffffffc088000000)
+[  0.049591 rt_tour_1_2:19] Alloc string: Hello, axalloc!
+[  0.050173 rt_tour_1_2:20] [rt_tour_1_2]: ok!
+[  0.050685 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
 ### 第五节 实验1.3 - 启用分页
@@ -656,6 +674,7 @@ flags从第10位往上是物理页帧号pfn，而低10位是页表项的属性�
 
 ```sh
 lk chroot rt_page_table
+lk prepare
 lk run
 ```
 
@@ -886,9 +905,18 @@ lk run
 
 
 
-### 第八节 实验2.6 - 互斥锁
+### 第八节 实验2.6 - 线程退出和互斥锁
 
-XXX
+实验预期输出：
+
+```sh
+[  0.032055 rt_mutex:20] [rt_mutex]: ...
+[  0.034355 axalloc:213] initialize global allocator at: [0xffffffc080273000, 0xffffffc088000000)
+[  0.038137 task:287] Initialize schedule system ...
+[  0.039305 task:236] CurrentTask::init_current...
+[  0.040092 rt_mutex:37] 0
+[  0.040629 rt_mutex:40] [rt_mutex]: ok!
+```
 
 
 
@@ -898,7 +926,81 @@ XXX
 
 
 
-## 第三章 - 地址空间和进程
+## 第三章 - 驱动和文件系统
+
+本章目标：首先支持块设备和文件系统的初始化，为内核提供文件访问服务；然后在上一章的基础上，把获取应用介质的方式从读PFlash转为访问文件系统。
+
+### 第一节 本章系统构成
+
+<img src="./README.assets/image-20240623170215320.png" alt="image-20240623170215320" style="zoom:80%;" />
+
+### 第二节 本章实验安排
+
+XXX
+
+### 第三节 实验3.1 - 基于内存的块设备驱动
+
+实验步骤：
+
+```sh
+lk chroot rt_ramdisk
+lk run
+```
+
+预期输出：
+
+成功读写内存块。
+
+
+
+### 第四节 实验3.2 - VirtioBlk块设备驱动
+
+实验步骤：
+
+```sh
+lk chroot rt_driver_virtio
+lk run
+```
+
+预期输出：
+
+成功读写块。
+
+### 第五节 实验3.3 - 文件系统展开
+
+立体展开文件系统，形成由目录和文件构成的树。
+
+对于有后备的文件系统，解析并展开存储在块设备中的扁平的序列化的文件系统数据；
+
+对于伪文件系统，直接建立立体化的目录文件树。
+
+<img src="./README.assets/image-20240624112624658.png" alt="image-20240624112624658" style="zoom:80%;" />
+
+实验步骤：
+
+```sh
+lk chroot rt_axmount
+lk prepare
+lk run
+```
+
+预期输出：
+
+挂载fat32文件系统并作为根文件系统，通过查找、读、写确认可操作性。
+
+
+
+### 第六节 实验3.4 - 从文件系统加载应用
+
+替换pflash方式。
+
+### 本章总结
+
+XXX
+
+
+
+## 第四章 - 地址空间和进程
 
 本章目标：在上一章基础上，内核支持多地址空间，支持进程级任务。原有的0号和1号线程职责不变，但对应升级为进程，其中1号进程拥有独立的地址空间。支持mmap和fork两个进程级别的高级操作。
 
@@ -910,35 +1012,13 @@ XXX
 
 XXX
 
-### 第三节 实验3.1 - 多页表
+### 第三节 实验4.1 - 多页表
 
-### 第四节 实验3.2 - 多地址空间和进程
+XXX
 
-实验步骤：
+### 第四节 实验4.2 - 创建进程级任务
 
-```sh
-lk chroot rt_mm
-lk run
-```
-
-预期输出：
-
-新建了单独的mm地址空间，同时产生了对应的根页表。
-
-### 第五节 实验3.3 - 地址空间映射mmap
-
-实验步骤：(待补充)
-
-```sh
-lk chroot test_mm_map
-lk run
-```
-
-预期输出：
-
-在指定的mm地址空间中记录映射区域，并在对应页表中产生映射项。
-
-### 第六节 实验3.4 - 复制创建进程fork
+### 
 
 <img src="./README.assets/image-20240624095858937.png" alt="image-20240624095858937" style="zoom: 50%;" />
 
@@ -959,68 +1039,43 @@ Fork系统以克隆的方式产生新的用户进程，它的上级使用者包�
 2. wakeup：把新进程的task投递到runq，等待调度。注：fork流程中不包括调度，因此并不真正启动新进程。
 3. ret from fork：从内核态返回到用户态的一系列特殊动作。因为是新产生的进程，与一般返回用户态的动作流程有一定区别。
 
+### 第五节 实验4.3 - 地址空间映射mmap
 
-
-### 本章总结
-
-XXX
-
-
-
-## 第四章 - 驱动和文件系统
-
-本章目标：首先支持块设备和文件系统的初始化，为内核提供文件访问服务；然后在上一章的基础上，把获取应用介质的方式从读PFlash转为访问文件系统。
-
-### 第一节 本章系统构成
-
-<img src="./README.assets/image-20240623170215320.png" alt="image-20240623170215320" style="zoom:80%;" />
-
-### 第二节 本章实验安排
-
-XXX
-
-### 第三节 实验4.1 - 块设备驱动
-
-实验步骤：
+实验步骤：(待补充)
 
 ```sh
-lk chroot rt_ramdisk
+lk chroot test_mm_map
 lk run
 ```
 
 预期输出：
 
-成功读写内存块。
+在指定的mm地址空间中记录映射区域，并在对应页表中产生映射项。
 
+### 第六节 实验4.4 - 进程级文件操作fileops
 
+<img src="./README.assets/image-20240624112724333.png" alt="image-20240624112724333" style="zoom:80%;" />
 
-实验步骤：
+实验操作：
 
 ```sh
-lk chroot rt_driver_virtio
+lk chroot rt_fstree
+lk prepare
 lk run
 ```
 
 预期输出：
 
-成功读写内存块。
-
-### 第四节 实验4.2 - 文件系统展开
-
-实验步骤：
-
 ```sh
-lk chroot rt_axmount
-lk run
+[  0.138114 axfs_vfs:256] ============== mount ...
+[  0.138519 axmount::fs::fatfs:140] create Dir at fatfs: /sys
+[  0.140492 axmount::fs::fatfs:120] lookup at fatfs: /sys
+[  0.142422 target:140] Is a directory
+[  0.145452 rt_fstree:20] cwd: /
+[  0.145889 rt_fstree:22] [rt_fstree]: ok!
 ```
 
-预期输出：
 
-挂载fat32文件系统并作为根文件系统，通过查找、读、写确认可操作性。
-
-### 第五节 实验4.3 - 文件操作
-
-### 第六节 实验4.4 - 通过文件系统加载应用
 
 ### 本章总结
 
@@ -1042,13 +1097,30 @@ XXX
 
 ### 第三节 实验5.1 - 解析ELF格式文件
 
-### 第四节 实验5.2 - Linux应用运行准备
+XXX
+
+### 第四节 实验5.2 - 准备用户应用地址空间
 
 <img src="./README.assets/image-20240624105611245.png" alt="image-20240624105611245" style="zoom:80%;" />
 
-### 第五节 实验5.3 - 支持GLibc和应用的系统调用
+leader组件bprm_loader基于应用程序重置当前进程的地址空间。在四个子系统配合下完成工作。
+
+1. 通过fileops打开和读应用程序。
+2. 通过elf解析应用程序文件头信息和各段信息。
+3. 通过mmap把标记为LOAD的各段映射到当前进程地址空间的指定位置。
+4. 通过userstack构造用户栈，映射到当前进程的地址空间。
+
+### 第五节 实验5.3 - 特权级切换启动应用
+
+XXX
+
+### 第六节 实验5.4 - 支持GLibc和应用的系统调用
+
+XXX
 
 ### 本章总结
+
+XXX
 
 
 
@@ -1066,11 +1138,15 @@ XXX
 
 ### 第三节 实验6.1 - 缺页加载
 
-### 第四节 实验6.2 - 写时拷贝COW
+xxx
 
-### 第五节 实验6.3 - 信号
+### 第四节 实验6.2 - 信号
 
-### 第六节 实验6.4 - ProcFS
+xxx
+
+### 第五节 实验6.3 - ProcFS
+
+xxx
 
 ### 本章总结
 
