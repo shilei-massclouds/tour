@@ -1,27 +1,44 @@
-通过本实验指导，我们将一起探索基于组件化构建宏内核的过程；在过程中，不断深入学习宏内核的构成原理，实践组件化构造内核系统的方法。初始，我们将提供一个基本框架，包括组件仓库和工具，这将是后面工作的基础；然后，按照从小到大，从简单到复杂的顺序，不断引入新组件，逐级构建内核系统，直至宏内核系统。每一级系统都是可运行和可测试的，它们在上一级的基础上，新增部分功能与特性。各级系统对应指导书中的各章，我们只需要按照章节顺序，完成各步骤的实验并学习相应级别系统的构成和原理。
+通过本实验指导，我们将一起探索基于组件化来构建宏内核的方法。在第零章中，先给出一个实验框架，这包括一个基础的组件仓库，一个管理组件和构建内核的工具，以及配套的系统构建方法。后面的各章，以迭代方式组织实验，从最简单的宏内核雏形开始，逐步扩展完善功能特性，最终形成一个典型的宏内核系统。每一章对应一轮迭代，每次迭代包含若干步骤，每个步骤对应一个实验，多数实验都是在之前实验的基础上进行扩展，但每个实验都可以独立运行。建议按照章节顺序，阅读相关原理和进行实验，并完成扩展练习。
 
 ## 第零章 - 实验准备
 
+本章介绍实验的背景概况和实验前需要进行的准备工作，并给出 实验0.1 - 系统引导 作为示例。
+
 ### 第一节 宏内核系统构成
+
+宏内核是在内核态集成了大部分操作系统核心功能的内核形态。
 
 宏内核系统对外提供两方面交互服务：
 
-1. 响应外部的中断、异常和系统调用（syscall通常是异常的一类）
-2. 在启动阶段，从存储介质取出默认的应用程序文件，作为首个用户态应用启动
+1. 在启动阶段，从存储介质取出默认的应用程序文件，作为首个用户态应用启动
+2. 在运行过程中，响应外部的中断、异常和系统调用（syscall通常是异常的一类）
 
-宏内核系统不含功能组件，直接由rt_macrokernel组织两个子系统trap和userboot构成系统，它们分别支持上述两个对外服务。
+宏内核系统对应rt_macrokernel组件，由它组织和协同userboot和trap两个子系统，分别支持上述两个对外服务。
 
 <img src="./README.assets/image-20240623103331244.png" alt="image-20240623103331244" style="zoom:80%;" />
 
+userboot和trap两个子系统由更小一级规模的子系统构成，直至最基本的组件。每级子系统封装本身和下级功能，通过简洁明确的接口为上级系统提供服务。后面的实验中，会体现这一层次化的设计模式。
+
 ### 第二节 组件仓库和组件分类
 
-XXX
+组件仓库包含了目前已经提取的具有可复用价值的独立组件。
+
+实验就是在选择和组合组件的基础上，层次化的构建目标系统，目标系统包括从基本的功能子系统到完整的宏内核系统。
+
+组件按照其功能和所处的层次，可以分为如下几个类别：
 
 <img src="./README.assets/image-20240623105958583.png" alt="image-20240623105958583" style="zoom:80%;" />
 
+1. 框架组件：所有目标实验系统都必须依赖的组件，包括boot和config。boot负责内核的早期引导，建立基本的运行环境，然后把执行权交由实验系统继续执行；config组件为系统提供可配置的编译选项和运行时参数。
+2. 接口组件（Interface）：直接与外部的应用或硬件设备进行交互的组件，它们主要承担的是外部请求转发，通过不负责具体的功能实现。
+3. 逻辑操作组件（Logic）：逻辑操作集合。
+4. 数据模型组件（Model）：对象的建模表示和维护运行实例。
+5. HAL组件：屏蔽体系结构和硬件复杂性，提供体系结构无关层接口。
+6. 辅助组件（Utility）：辅助系统开发、调试和运行的非必要组件。包括logging、tracing等。
+
 ### 第三节 总体实验安排
 
-实验包括六次迭代，每一次迭代都建立在上次迭代的基础上，并且每次迭代成果都是一个宏内核系统：从最简单的雏形到兼容Linux的典型宏内核。
+实验包括六次迭代，分别对应第一章到第六章。每一次迭代都建立在上次迭代的基础上，并且每次迭代成果都是一个宏内核系统：从最简单的雏形到兼容Linux的典型宏内核。
 
 <img src="./README.assets/image-20240628221423317.png" alt="image-20240628221423317" style="zoom:80%;" />
 
@@ -29,23 +46,73 @@ XXX
 
 <img src="./README.assets/image-20240628214652683.png" alt="image-20240628214652683" style="zoom:80%;" />
 
-### 第四节 实验框架与工具使用
+### 第四节 实验框架和环境
 
-为简化实验环境和操作步骤，建立了lktool工具和相应的实验框架，如下：
+每一步实验都是构建一个特定功能的组件化子系统，并对它进行必要的功能和性能验证。
 
-<img src="./README.assets/image-20240623223130147.png" alt="image-20240623223130147" style="zoom:80%;" />
+为简化实验操作，在组件仓库的基础上提供lktool工具和构建系统方法，建立如下的实验框架。
 
-每一步实验的目标都是构建一级组件化的子系统，并对它进行必要的功能和性能验证。这主要通过框架和工具配合完成。
+<img src="./README.assets/image-20240629163517996.png" alt="image-20240629163517996" style="zoom:80%;" />
 
-框架分为上下两个部分，上半部包括boot组件和rt_mod运行时组件，前者负责内核的最初引导，后者为目标子系统准备运行环境并启动，下半部config组件为框架和目标系统提供全局参数和配置的支持。
+工具lktool负责管理组件仓库，并封装了配置、准备资源、编译和运行等构建步骤，简化实验过程。
 
-工具lktool封装了配置、准备资源、编译和运行等构建步骤，简化实验过程。
+目标实验系统分为三层：
 
-基于上述框架和工具，本实验将从最基础的组件子系统开始，逐级构建更复杂的系统，直至宏内核。
+1. 上层框架：boot组件引导系统并建立运行环境。
+2. 核心部分：实现当前实验的核心功能，达成本步骤的目标。其中rt_tour_X_X作为核心组件，组织必要的子系统协同完成核心功能。
+3. 下层框架：config组件为系统提供可配置的编译选项和运行参数。
 
-<img src="./README.assets/image-20240623223210794.png" alt="image-20240623223210794" style="zoom:80%;" />
+这主要通过框架和工具配合完成。
 
-**实验准备**：
+> 核心组件rt_tour_X_X代表当前实验，其中X_X是实验的编号，分别为迭代序号和步骤序号。
+>
+> 当切换实验时，以该组件名称为标志性参数。
+>
+> 如本章唯一的实验0.1，它的核心组件就是rt_tour_0_1。
+>
+> 通过执行`lk chroot rt_tour_0_1`把实验0.1设置为当前实验。
+
+
+
+#### 建立实验环境
+
+目前本指导书的所有实验基于Ubuntu22.04 LTS - X86_64的系统环境。可以基于物理机或WSL2。
+
+> 如果选用其它Linux发行版或Ubuntu的其它版本，实验过程中可能会发生意外情况。建议遵循上述环境要求。
+
+
+
+1. 基础开发工具和库
+
+   ```sh
+   sudo apt install autoconf automake autotools-dev curl libmpc-dev libmpfr-dev \
+       libgmp-dev gawk build-essential bison flex texinfo gperf libtool \
+       patchutils bc zlib1g-dev libexpat-dev pkg-config  libglib2.0-dev \
+       libpixman-1-dev libsdl2-dev git tmux python3 python3-pip ninja-build
+   ```
+
+2. Rust 开发环境
+
+   ```sh
+   curl https://sh.rustup.rs -sSf | sh
+   cargo install cargo-binutils
+   ```
+
+3. Qemu 模拟器（RiscV64）
+
+   ```sh
+   sudo apt install qemu-system-riscv64
+   ```
+
+4. RiscV 工具集
+
+   ```sh
+   sudo apt install binutils-riscv64-unknown-elf
+   ```
+
+
+
+#### 实验工程和lktool工具
 
 1. 下载项目工程和切换分支
 
@@ -71,32 +138,59 @@ XXX
 
    > 注意：需要把/home/cloud/gitWork/lktool替换为实际路径
 
-**实验步骤**：
 
-本实验指导中所有的实验，基本都遵循如下步骤：
+
+#### 实验基本操作步骤
+
+实验只针对Riscv64体系结构，目前实验工程lkmodel的默认配置就是该体系结构，如果不是，请执行如下命令重置：
 
 ```sh
 lk config riscv64
-lk chroot rt_xxx
+```
+
+
+
+对指导书宏的所有实验，都遵循如下操作步骤：
+
+```sh
+lk chroot rt_tour_X_X
 lk prepare
 lk run
 ```
 
-第1行：设置当前体系结构，默认就是riscv64。通常来说，保持默认即可； 如果中间实验过基于x86_64进行了实验，我们只需要执行一次切换回来。
+第1行：每一次实验都是在构建一个可以独立运行的内核系统。如前述，核心组件rt_tour_X_X代表它对应的特定实验，命名中的X_X就是实验编号。如rt_tour_0_1对应本章实验0.1。
 
-第2行：每一次实验都是在构建一个可以独立运行的内核系统，rt_xxx是该系统的顶级组件。我们会在每个实验中明确指出具体名称。
+第2行：部分实验需要一些前置条件，比如可能需要构建一个磁盘系统或提供具体的文件系统作为数据源。这些通过prepare自动建立，所以建议每个实验中都默认执行这一步。不需要额外准备的，该步骤是空操作。
 
-第3行：部分实验需要一些前置条件，比如可能需要构建一个磁盘系统或提供具体的文件系统作为数据源。这些通过prepare自动建立，所以建议每个实验中都默认执行这一步。
-
-第4行：正式运行实验，并观察结果。
+第3行：正式运行实验，并观察结果。
 
 
 
 ### 第五节 实验0.1 - 系统引导
 
+这是本指导书的第一个实验，实现单纯的内核系统启动，建立一个基本的运行环境。
+
+目标实验系统的构成如下：
+
+<img src="./README.assets/image-20240629183114009.png" alt="image-20240629183114009" style="zoom:80%;" />
+
+所以仅需要关注两个组件， arch_boot和rt_tour_0_1。
+
+arch_boot是重点，掌握引导原理和具体过程是本节实验的目标。（lkmodel/arch_boot/arch_boot）
+
+rt_tour_0_1只是在引导完成后启动的一个“空壳”，用于验证系统引导成功并退出。(lkmodel/tour_stage/rt_tour_0_1)
+
+下面就来关注一下计算机系统中，内核引导的原理和基本过程。
+
+> 后面所有的实验章节都参照本节的形式，先说明实验目标，然后介绍原理性知识，最后进行实验操作。
+>
+> 但在实际学习过程中，也可以先做实验，再回头看前面的原理性内容。
+
+
+
 从计算机启动到内核启动通常要经历下面两个阶段：
 
-<img src="./README.assets/image-20240623225832253.png" alt="image-20240623225832253" style="zoom: 50%;" />
+<img src="./README.assets/image-20240629181448622.png" alt="image-20240629181448622" style="zoom:80%;" />
 
 模拟器qemu-riscv64启动时，将会经历几个阶段：
 
@@ -125,12 +219,16 @@ lk run
 
 3. 内核入口必须在Image文件的开头
 
-   Rust编译器默认情况下，会自己安排可执行程序文件的分段与符号布局。由于我们必须确保内核入口在最前面，所以需要通过自定义LDS文件方式，控制内核image文件的布局。后面实验将会用到下面的LDS文件linker.lds：
+   Rust编译器默认情况下，会自己安排可执行程序文件的分段与符号布局。由于我们必须确保内核入口在最前面，所以需要通过自定义LDS文件方式，控制内核image文件的布局。
 
+   arch_boot组件包含LDS模板文件linker.lds，在编译时该组件的build.rs会根据当前的体系结构，生成最终的目标文件。
+   
+   在本实验中就是lkmodel/arch_boot/arch_boot/linker_riscv64-qemu-virt.lds
+   
    ```shell
    OUTPUT_ARCH(riscv)
    
-   BASE_ADDRESS = 0x80200000;
+   BASE_ADDRESS = 0xffffffc080200000;
    
    ENTRY(_start)
    SECTIONS
@@ -154,148 +252,78 @@ lk run
 
    首先是把代码区.text作为第一个section，并且其中\*(.text.boot)在\*(.text .text.\*)之前，后者是代码默认情况下所属的section属性。将来我们把内核入口的代码标记在.text.boot区域中，就可以确保它会被最早执行。
 
-   此外，起始地址BASE_ADDRESS是0x8020_0000，正是内核的运行地址，这样就可以把内核的链接地址和运行地址一致起来。如果它们不一致，基于绝对寻址方式的指令将无法正常运行，进而导致内核崩溃。将来我们当我们启用分页机制之后，会把这个地址固定改成对应的虚拟地址0xffff_ffc0_8020_0000。直观看来，这个虚拟地址相对物理地址存在一个偏移量0xffff_ffc0_0000_0000，这个偏移的名字是**PHYS_VIRT_OFFSET**，将来它会在虚实地址转换中发挥重要作用，后面第二章第一节会介绍这个偏移量是如何得出的。
-
-   > 注：如果此时就把BASE_ADDRESS设置为0xffff_ffc0_8020_0000或者其它的什么值，似乎程序最初也可以正常运行一部分代码。主要原因是，内核启动早期的那些汇编指令，通常会被有意保持为相对寻址，即它们是位置无关指令，所以BASE_ADDRESS对它们不起作用。但是相对寻址的地址范围受到限制，我们不能要求内核完全采用这种寻址方式，通常只是要求在启用分页之前的指令必须是相对寻址方式。
-
+   此外，起始地址BASE_ADDRESS是一个虚拟地址0xffffffc080200000，它与期望的加载内核的物理地址0x8020_0000之间正好相差一个偏移0xffff_ffc0_0000_0000，这个偏移的名字是**PHYS_VIRT_OFFSET**，将来它会在虚实地址转换中发挥重要作用。目前该地址不起作用，暂时忽略它。主要的原因是，最初的引导代码寻找方式是相对PC寻址，即引导代码是位置无关的。
+   
    LDS中还有一些其它的关键信息，在后边章节再详细介绍。
 
 
 
 在内核获得控制权后，进行如下步骤的引导和初始化：
 
-各种操作系统内核在最初启动时，通常都需要完成以下的几项工作：
-
-1. **清零BSS区域**
-2. 保存一些必要的信息
-3. 启用内存分页
+1. 保存一些必要的信息
+2. 建立栈以支持函数调用
+3. 启用分页，支持虚拟地址空间
 4. 设置中断/异常向量表
-5. **建立栈以支持函数调用**
-6. ... ...
+5. 清零BSS区域
+6. 调用固定名称的外部函数入口runtime_main
 
-每一项初始工作都具有特定的作用，并且与后续的工作相关。
+前面4步是汇编代码，第5步开始进入到Rust函数中执行。
 
-这一节作为起步阶段，首先完成**第1步和第5步**，其它工作项暂时忽略，我们将在扩展对应的内核功能时，再回头进行补充。
-
-**第1步** - 清零BSS区域
-
-BSS是构成内核Image的一个特殊的数据区，编译器会把程序中未显式初始化的全局变量放到这个区域，这些全局变量默认值都应当是零。但是编译器本身并不执行BSS清零工作，这个通常是ELF加载器的工作。对于我们正在开发的内核，既然没有其它程序替我们完成，那就只好自己对BSS区域清零。
-
-**第5步** - 建立栈以支持函数调用
-
-建立栈支持函数调用之后，我们就可以脱离晦涩的汇编语言，进入Rust的编程世界，利用Rust高级语言提供的各种先进特性实现内核功能。作为Unikernel内核，应用与内核都会使用这同一个栈，所以我们直接预分配256K的大栈空间，减少将来因栈溢出而带来的困扰。
-
-
-
-我们本节要实验的是“空”框架的启动，即重点在于boot子系统的启动过程，最后只是启动一个最简单的内核系统rt_axconfig，它会检查一下axconfig的一个配置项，然后就进入到无限循环。
-
-先来看引导系统boot，结合前面的原理：
+第6步是arch_boot与rt_tour_0_1两个组件之间的交界点，标志着引导阶段结束，开始核心代码部分的执行。
 
 ```rust
-// arch_boot/arch_boot/src/platform/riscv64_qemu_virt/boot.rs
-#[naked]
-#[no_mangle]
-#[link_section = ".text.boot"]
-unsafe extern "C" fn _start() -> ! {
-    // PC = 0x8020_0000
-    // a0 = hartid
-    // a1 = dtb
-    core::arch::asm!("
-        mv      s0, a0                  // save hartid
-        mv      s1, a1                  // save DTB pointer
-        la      sp, {boot_stack}
-        li      t0, {boot_stack_size}
-        add     sp, sp, t0              // setup boot stack
+//arch_boot/arch_boot/src/platform/riscv64_qemu_virt/mod.rs
 
-        call    {init_boot_page_table}
-        call    {init_mmu}              // setup boot page table and enabel MMU
+unsafe extern "C" fn rust_entry(cpu_id: usize, dtb: usize) {
+    super::clear_bss();
+    // Todo: remove it in future.
+    // We need to enable sum only when necessary.
+    riscv::register::sstatus::set_sum();
 
-        li      s2, {phys_virt_offset}  // fix up virtual high address
-        add     sp, sp, s2
+    runtime_main(cpu_id, dtb);
+}
 
-        mv      a0, s0
-        mv      a1, s1
-        la      a2, {entry}
-        add     a2, a2, s2
-        jalr    a2                      // call rust_entry(hartid, dtb)
-        j       .",
-        phys_virt_offset = const PHYS_VIRT_OFFSET,
-        boot_stack_size = const TASK_STACK_SIZE,
-        boot_stack = sym BOOT_STACK,
-        init_boot_page_table = sym init_boot_page_table,
-        init_mmu = sym init_mmu,
-        entry = sym super::rust_entry,
-        options(noreturn),
-    )
+extern "Rust" {
+    fn runtime_main(cpu_id: usize, dtb: usize);
 }
 ```
 
-从_start入口开始，上面这段汇编代码分为三个部分：
+包括rt_tour_0_1在内所有的rt_xxx组件都会实现这个runtime_main函数，从而可以接过arch_boot对系统的执行权。
 
-第8~15行：实现了BSS清零，BSS区域的起止地址是\_sbss和\_ebss，都定义在linker.lds中的.bss段中，符号可以被汇编直接引用。
-
-<img src="./README.assets/image-20240623225902542.png" alt="image-20240623225902542" style="zoom:80%;" />
-
-第17行：初始化寄存器sp，指向栈空间的最高地址 - 即栈底位置boot_stack_top，该符号同样是定义在linker.lds文件的.bss中。如上图，在.bss段的开头，预留了256K的空间，并且boot_stack_top是空间的最高地址。另外，需要注意的是，这段栈空间并**不**包含在由\_sbss和\_ebss标记的范围内，因为栈不需要预先初始化。
-
-第25和26行：在栈准备好的情况下，首次进入Rust函数rust_entry。
-
-先通过la指令取得rust_entry的入口地址，然后通过jalr调用该地址。按照RiscV规范，a0到a7寄存器分别作为函数调用的前8个参数，当下只有a0和a1是有效的。这两个寄存器由上一级引导程序SBI设置，a0保存了HartID，也就是当前cpu核的硬件ID；a1则指向了一块内存区，其中保存的是描述底层平台硬件信息的设备树，即dtb。
-
-从上面的那段汇编代码可以看出，内核从启动到调用Rust入口函数过程中，没有使用过a0和a1。如果在这个过程中必须使用它们，就必须先暂存它们的值，然后在调用rust_entry前恢复回来。这个就是本节开始时，提到的**第2项**任务，将来会看到这种处理的必要性。
-
-
-
-然后，看看rt_axconfig的实现：
+本实验中，rt_tour_0_1只是用于确认引导过程成功，因而实现非常简单 - 直接停机。
 
 ```rust
-// axconfig/rt_axconfig/src/main.rs
-#![no_std]
-#![no_main]
-
-use core::panic::PanicInfo;
-
+// tour_stage/rt_tour_0_1/src/main.rs
 #[no_mangle]
 pub extern "Rust" fn runtime_main(_cpu_id: usize, _dtb_pa: usize) {
-    assert_eq!(axconfig::ARCH, env!("AX_ARCH"));
-    panic!("Reach here!");
-}
-
-#[panic_handler]
-pub fn panic(info: &PanicInfo) -> ! {
-    arch_boot::panic(info)
+    axhal::misc::terminate();
 }
 ```
 
-第8行开始的runtime_main是我们当前实验系统的主要逻辑，检查arch符合后，直接panic。
-
-然后看一下关于arch_boot::panic的实现：
-
-```rust
-pub fn panic(_info: &PanicInfo) -> ! {
-    loop {}
-}
-```
-
-很简单，无限循环。下面就来实践一下，这是我们进行的第一个实验。
-
-如上一章的标准实验步骤：
+下面就来实际操作一下实验过程，如上一章所述的标准步骤：
 
 ```sh
-lk chroot rt_axconfig
+lk chroot rt_tour_0_1
 lk prepare
 lk run
 ```
 
 显示结果：
 
-<img src="./README.assets/image-20240623225927828.png" alt="image-20240623225927828" style="zoom:80%;" />
+```sh
+... ...
+Boot HART MHPM Count      : 0
+Boot HART MIDELEG         : 0x0000000000000222
+Boot HART MEDELEG         : 0x000000000000b109
+cloud@server:~/gitWork/lkmodel$
+```
 
-在打印一些OpenSBI的常规输出后，就卡住了。但这是正常的，因为此时我们既没有输出也没有停机。通过ctrl+x+a退出qemu执行。
+在打印一些OpenSBI的常规输出后，系统退出。
 
-确认执行正常的方式是查看当前目录下生成的qemu.log，内容如下：
+确认执行正常的方式是查看当前目录下生成的qemu.log，定位到地址0x0000000080200000，即内核入口处，内容如下：
 
 ```assembly
+----------------
 IN:
 Priv: 1; Virt: 0
 0x0000000080200000:  842a              mv              s0,a0
@@ -305,31 +333,42 @@ Priv: 1; Virt: 0
 0x000000008020000c:  000402b7          lui             t0,262144
 0x0000000080200010:  9116              add             sp,sp,t0
 0x0000000080200012:  00000097          auipc           ra,0            # 0x80200012
-0x0000000080200016:  032080e7          jalr            ra,ra,50
-
-... ...
+0x0000000080200016:  02a080e7          jalr            ra,ra,42
 
 ----------------
 IN:
 Priv: 1; Virt: 0
-0xffffffc0802000ba:  a001              j               0               # 0xffffffc0802000ba
+0x000000008020003c:  00001517          auipc           a0,4096         # 0x8020103c
+0x0000000080200040:  fc450513          addi            a0,a0,-60
+0x0000000080200044:  200005b7          lui             a1,536870912
+0x0000000080200048:  0ef5859b          addiw           a1,a1,239
+0x000000008020004c:  e90c              sd              a1,16(a0)
+0x000000008020004e:  7ff50513          addi            a0,a0,2047
+0x0000000080200052:  00b538a3          sd              a1,17(a0)
+0x0000000080200056:  8082              ret
 ```
 
-第17行：指令"j 0"就是arch_boot::panic中`loop {}`对应的汇编代码，系统在此卡住。
+从日志中0x80200000的那行开始，与arch_boot的启动代码进行对照，可以确认内核完成了引导过程。
 
-建议大家从日志中0x80200000的那行开始查看，与arch_boot的启动代码进行对照，可以从体系结构层面加深对启动过程的理解。
+通过这个对照过程，可以帮助我们从体系结构层面加深对启动过程的理解。
 
 
 
-目前第一个实验的内核系统rt_axconfig还干不了任何有意义的事，它仅是一个“空”的框架。从下章开始，我们将不断的基于这个框架加入新组件和扩展新功能，逐步构建更大规模的内核系统。
+### 本章总结
+
+本章首先介绍了实验背景和概况，然后说明了如何建立实验环境以及实验操作的步骤，最后给出了第一个实验0.1。
+
+目前实验0.1构建的内核系统还干不了任何有意义的事，它仅是一个“空”的框架。
+
+下一章，我们将实验基于层次化方式逐步构建出一个原始的宏内核。
 
 
 
 ## 第一章 - 从Unikernel到宏内核
 
-本章目标：建立最原始的宏内核系统。内核以单线程模式，从pflash加载应用并切换到**用户态**执行。用户态应用运行期间，依次触发异常、发出系统调用，内核能够正常响应和处理。为完成上述功能，内核首先需要支持日志输出、动态内存分配和页表映射功能。
+本章目标：建立最原始的宏内核系统。内核以单线程模式，从pflash加载应用并切换到**用户态**执行。用户态应用运行期间，依次触发异常和系统调用，而内核能够正常响应和处理。为完成上述功能，内核首先需要支持日志输出、动态内存分配和页表映射功能。
 
-当前阶段宏内核的大部分功能与Unikernel无异，只是在特权级切换与系统调用方面扩展了少量功能。本章进行的一系列实验，展示了从最简单的Unikernel向宏内核演变的过程。
+当前阶段宏内核的大部分功能与Unikernel无异，只是在特权级切换与系统调用方面扩展了少量功能。本章进行的一系列实验，可以看作是从最简单的Unikernel向宏内核演变的过程。
 
 ### 第一节 本章系统构成
 
@@ -353,14 +392,15 @@ Priv: 1; Virt: 0
 
 ### 第三节 实验1.1 - 控制台输出和系统日志
 
-到目前为止，我们还看不到内核的输出信息，只能通过查看qemu跟踪日志确认工作成果。现在是实现打印输出的时候了！
+上一章进行了第一个实验，但我们看不到内核的输出信息，只能通过查看qemu跟踪日志确认工作结果。现在是实现打印输出的时候了！
 
-有两个办法可以让内核支持console，一是通过管理Uart串口设备进行输出，二是直接调用OpenSBI提供的功能。前一个方式需要自己实现驱动，但目前我们连最基础的内存管理都未能完成，缺乏实现驱动的条件；所以决定采用第二个办法。
+#### 控制台输出
 
-前面一章提到，OpenSBI提供了一系列功能调用，可以通过调用号去请求SBI为我们完成部分工作。查阅OpenSBI文档，发现功能调用**console_putchar**具有打印输出一个字符的能力，正可以作为输出功能的基础。然后从crates.io中，我们找到了sbi-rt这个现成的库，它封装了对sbi功能调用的各种方法。现在就使用它来实现console模块。
+有两个办法可以让内核支持console，一是通过管理Uart串口设备进行输出，二是直接调用OpenSBI提供的功能。前一个方式需要自己实现驱动，但目前我们连最基础的内存管理都未能完成，缺乏实现驱动的条件；所以决定采用第二个办法。基于SBI的控制台仅用于内核系统的早期启动阶段，命名为early_console；等条件具备后，再实现正式的console设备并切换。
+
+OpenSBI提供了一系列功能调用，可以通过调用号去请求SBI为我们完成部分工作。查阅OpenSBI文档，发现功能调用**console_putchar**具有打印输出一个字符的能力，正可以作为输出功能的基础。然后从crates.io中，我们找到了sbi-rt这个现成的库，它封装了对sbi功能调用的各种方法。现在就使用它来实现early_console组件。
 
 ```rust
-// early_console/src/console.rs
 pub fn putchar(c: u8) {
     #[allow(deprecated)]
     sbi_rt::legacy::console_putchar(c as usize);
@@ -373,94 +413,25 @@ pub fn write_bytes(bytes: &[u8]) {
 }
 ```
 
-在Cargo.toml中，引入对sbi-rt的依赖
+系统中直接调用early_console::write_bytes，就可以完成屏幕信息的输出。
 
 ```rust
-// early_console/Cargo.toml
-[dependencies]
-sbi-rt = { version = "0.0.2", features = ["legacy"] }
+// tour_stage/rt_tour_1_1/src/main.rs
+
+#[no_mangle]
+pub extern "Rust" fn runtime_main(_cpu_id: usize, _dtb_pa: usize) {
+    let msg = "\n[rt_tour_1_1]: earlycon!\n\n";
+    early_console::write_bytes(msg.as_bytes());
+	... ...
+}
 ```
 
-步骤：
+#### 系统日志
 
-```sh
-lk chroot rt_tour_1_1
-lk run
-```
-
-结果：从屏幕输出如下字符串
-
-```sh
-[rt_tour_1_1]: ok!
-```
-
-证明功能运行成功！
-
-
-
-现在我们来为内核正式实现日志组件axlog。在crates.io中已经有一个非常通用的日志crate - log，它主要用于普通应用的开发；本节我们将以它为基础进行封装和扩展，满足内核对日志设施的需要。
-
-首先实现日志的初始化过程和级别设置：
+基于early_console打印信息的方式比较原始，难以满足我们在内核开发中的需要，我们还需要以它为基础，来为内核提供正式的日志功能。在crates.io中有一个用的logging框架，通过实现少量接口就可以获得一个功能完备的日志机制。
 
 ```rust
-// axlog/Cargo.toml
-[dependencies]
-log = "0.4"
-crate_interface = "0.1.1"
-
-// axlog/src/lib.rs
-#![no_std]
-
-use core::fmt::{self, Write};
-use core::str::FromStr;
-use crate_interface::call_interface;
-use log::{Level, LevelFilter, Log, Metadata, Record};
-pub use log::{debug, error, info, trace, warn};
-
-#[crate_interface::def_interface]
-pub trait LogIf {
-    fn write_str(s: &str);
-    fn get_time() -> core::time::Duration;
-}
-
-struct Logger;
-
-pub fn init() {
-    log::set_logger(&Logger).unwrap();
-    log::set_max_level(LevelFilter::Warn);
-}
-
-pub fn set_max_level(level: &str) {
-    let lf = LevelFilter::from_str(level).ok().unwrap_or(LevelFilter::Off);
-    log::set_max_level(lf);
-}
-```
-
-第4行：Cargo.toml引入log和crate_interface两个crates。
-
-第21行：全局的日志实例Logger，它代表了日志对象，将来对日志的各种操作主要都是针对它。
-
-第23~26行：上一节init()的实现仅是为了测试crate_interface，这里重新实现。先是指定日志对象，然后设置默认日志级别warn。
-
-第28~31行：控制日志级别set_max_level，支持关闭`off`以及 `error`, `warn`, `info`, `debug`, `trace`5个级别。默认是`warn`级，即默认情况下只输出警告与错误。
-
-然后，最重要的一步，按照crate log的实现要求，为Logger实现trait Log接口。这个外部的crate log本身是一个框架，实现了日志的各种通用功能，但是如何对日志进行输出需要基于所在的环境，这个trait Log就是通用功能与环境交互的接口。
-
-下面列出实现Log接口的具体逻辑：
-
-```rust
-macro_rules! with_color {
-    ($color_code:expr, $($arg:tt)*) => {{
-        format_args!("\u{1B}[{}m{}\u{1B}[m", $color_code as u8, format_args!($($arg)*))
-    }};
-}
-
-#[repr(u8)]
-#[allow(dead_code)]
-enum ColorCode {
-    Red = 31, Green = 32, Yellow = 33, Cyan = 36, White = 37, BrightBlack = 90,
-}
-
+// axlog2/axlog2/src/lib.rs
 impl Log for Logger {
     #[inline]
     fn enabled(&self, _metadata: &Metadata) -> bool {
@@ -468,16 +439,7 @@ impl Log for Logger {
     }
 
     fn log(&self, record: &Record) {
-        let level = record.level();
-        let line = record.line().unwrap_or(0);
-        let path = record.target();
-        let args_color = match level {
-            Level::Error => ColorCode::Red,
-            Level::Warn => ColorCode::Yellow,
-            Level::Info => ColorCode::Green,
-            Level::Debug => ColorCode::Cyan,
-            Level::Trace => ColorCode::BrightBlack,
-        };
+		... ...
         let now = call_interface!(LogIf::get_time);
 
         print_fmt(with_color!(
@@ -495,90 +457,89 @@ impl Log for Logger {
 }
 ```
 
-第1~11行：为日志输出功能准备一个宏with_color和颜色代码，后面将根据级别为日志文本增加不同的颜色。
-
-第13~17行：是否启用日志功能，硬编码启用即可。
-
-第19~41行：Log::log方法是关键，准备好显示颜色、当前时间、当前模块路径、行号以及日志内容等一系列参数，然后调用print_fmt执行日志的输出功能。
-
-第43行：flush刷新日志缓存。我们内核日志目前只是打印到屏幕，不涉及刷新，所以忽略。
-
-下一步来看print_fmt的具体实现：
+重点是实现Logger::log，内部通过print_fmt实现日志输出，中间经过了Logger对象的处理，它实现了core::fmt::Write这个Trait。中间层为日志赋予了对变参的处理能力。如下：
 
 ```rust
 impl Write for Logger {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        call_interface!(LogIf::write_str, s);
+        early_console::write_bytes(s.as_bytes());
         Ok(())
     }
 }
 
 pub fn print_fmt(args: fmt::Arguments) {
-    let _ = Logger.write_fmt(args);
+    Logger.write_fmt(args)
 }
 ```
 
-第1~6行：为Logger实现Write trait，目的是借助Rust提供的这个trait，完成从变参到最终字符串的转换。我们只需要实现write_str方法，输入参数已经是处理好的结果字符串，然后通过call_interface调用axhal中实现的LogIf::write_str来完成日志输出。
+第3行：最终仍然是通过early_console::write_bytes输出信息到屏幕，但是现在可以调用更高级的日志接口来输出跟踪调试信息。
 
-第8~10行：print_fmt的实现。既然Logger已经实现了Write trait，我们只需要调用Logger的write_fmt方法，Logger就会自动处理变参，进而如上面所述，通过write_str进行输出。
+```rust
+#[no_mangle]
+pub extern "Rust" fn runtime_main(_cpu_id: usize, _dtb_pa: usize) {
+	... ...
+    axlog2::init("debug");
+    info!("[rt_tour_1_1]: ...");
+    info!("[rt_tour_1_1]: ok!");
+    axhal::misc::terminate();
+}
+```
 
-实验步骤：
+
+
+具体的实验操作：
 
 ```sh
-lk chroot rt_axlog2
+lk chroot rt_tour_1_1
+lk prepare
 lk run
 ```
 
-输出：打印出如下日志
+屏幕打印如下信息：
 
 ```sh
-[  0.037260 rt_axlog2:12] [rt_axlog2]: ...
-[  0.039436 rt_axlog2:13] [rt_axlog2]: ok!
-[  0.039976 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+
+[rt_tour_1_1]: earlycon!
+
+Logging is enabled.
+
+[  0.033721 rt_tour_1_1:15] [rt_tour_1_1]: ...
+[  0.035934 rt_tour_1_1:16] [rt_tour_1_1]: ok!
+[  0.036447 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
-当前系统已经具备了基于级别打印日志的功能。
+第2行是直接通过early_console输出的信息。
+
+第4行是启用logging之后的输出信息，可以尝试通过修改日志等级来控制输出信息的详细程度。
+
+当前系统已经具备了基于级别打印日志的功能，但是只能输出有限类型的信息。对于String、Vec等复合类型还不能支持，主要原因是当前内核缺乏动态内存分配的功能。下一节就来实现这部分。
+
+
 
 ### 第四节 实验1.2 - 动态内存分配
 
-为内核启用动态内存分配功能，主要分两个步骤：
-
-1. 向Rust声明一个支持GlobalAlloc Trait的内存分配器GlobalAllocator，这个Trait是向Rust提供动态内存分配服务的标准接口。
-2. 初始化内存分配器，为它指定可以使用的内存地址范围。
-
-<img src="./README.assets/global_allocator-1719188389045-1.svg" alt="global_allocator" style="zoom:80%;" />
-
-如上图，全局内存分配器GlobalAllocator实现GlobalAlloc Trait，它包含两个功能：字节分配和页分配，分别用于响应对应请求。区分两种请求的策略是，请求分配的大小是页大小的倍数且按页对齐，就视作申请页；否则就是按字节申请分配。这两个内部功能可以由各种内存分配算法支持实现，当前是内核启动早期，我们基于上节提供的early allocator支持两种功能。
-
-全局内存分配器启用时必须指定一组可用的内存地址范围(至少一个)。在内核启动早期，通过early_init方法初始化并启用，这就是本节要实现的主要内容；然后在适当时刻，调用final_init方法切换到正式的内存分配器，
-
-
-
-在Rust开发中，String、Vector之类的各种复合类型为我们带来了很大便利。但是我们的内核目前还不支持，因为没有实现动态内存分配器。我们可以来尝试一下，把axorigin的main函数改成这样：
+在Rust开发中，String、Vector之类的各种复合类型为我们带来了很大便利。但是我们的内核目前还不支持，因为没有实现动态内存分配器。我们可以来尝试一下，把实验rt_tour_1_1的runtime_main函数改成这样：
 
 ```rust
-// axorigin/src/main.rs
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-use alloc::string::String;
-use axhal::ax_println;
-
 #[no_mangle]
-pub fn main(_hartid: usize, _dtb: usize) {
+pub extern "Rust" fn runtime_main(_cpu_id: usize, _dtb_pa: usize) {
+    axlog2::init("debug");
     let s = String::from("from String");
-    ax_println!("\nHello, ArceOS![{}]", s);
+    info!("[rt_tour_1_1]: ... [{}]", s);
+    info!("[rt_tour_1_1]: ok!");
+    axhal::misc::terminate();
 }
 ```
 
-通过`make build`编译一下，报错：
+按照上节的步骤编译或运行时，会报如下的错误：
 
-```shell
+```sh
 error: no global memory allocator found but one is required; link to std or add `#[global_allocator]` to a static item that implements the GlobalAlloc trait
 ```
 
-果然不支持，String需要动态内存即堆管理的支持，普通Rust应用经由std标准库去申请底层操作系统内核对内存分配的支持，但是我们本身就是在实现内核，所以只能自己实现，即 - 我们按照Rust框架要求，实现内核级的动态内存分配器。
+String需要动态内存即堆管理的支持，在Rust开发中有这种需求的还包括Box、Arc等智能指针等其它类型和机制。
+
+普通Rust应用经由std标准库去申请底层操作系统内核对内存分配的支持，但是我们本身就是在实现内核，没有std标准库，所以只能自己实现内核级的内存分配器。本节的目标是，为内核实现支持动态内存分配的分配器。
 
 内核级内存分配器需要满足两个方面的要求：
 
@@ -587,7 +548,56 @@ error: no global memory allocator found but one is required; link to std or add 
 
 总结一下，功能上我们需要两种相互独立的内存分配器，一种基于字节分配，另一种基于页分配。
 
-实验步骤：
+实现过程分三个步骤：
+
+1. 向Rust声明一个支持GlobalAlloc Trait的内存分配器GlobalAllocator，这个Trait是向Rust提供动态内存分配服务的标准接口。GlobalAllocator内部包含两个子分配器：**页**内存分配器和**字节**内存分配器。
+2. 初始化**页**内存分配器，为它指定可以使用的全部内存地址范围，此时的内核可以支持按页分配内存。页分配的默认算法是bitmap。
+3. 初始化**字节**内存分配器，该分配器可用的内存来自**页**内存分配器，在初始化或内存不足时，向**页**内存分配器申请。完成该步骤后，内核就可以支持各种基于alloc库的类型和机制。字节分配的默认算法是tlsf。
+
+<img src="./README.assets/global_allocator-1719188389045-1.svg" alt="global_allocator" style="zoom:80%;" />
+
+下面来验证动态内存分配的能力：
+
+```rust
+#[no_mangle]
+pub extern "Rust" fn runtime_main(_cpu_id: usize, _dtb_pa: usize) {
+    axlog2::init("debug");
+    info!("[rt_tour_1_2]: ...");
+
+    axalloc::init();
+
+    let s = String::from("Hello, axalloc!");
+    info!("Alloc string: {}", s);
+
+    let va = global_allocator().alloc_pages(1, PAGE_SIZE_4K).unwrap();
+    info!("Alloc page: {:#x}", va);
+
+    let dwords = unsafe {
+        slice::from_raw_parts_mut(va as *mut u64, PAGE_SIZE_4K/8)
+    };
+    for dw in dwords.iter_mut() {
+        *dw = 0xAABBCCDD;
+    }
+    for dw in dwords {
+        assert_eq!(*dw, 0xAABBCCDD);
+    }
+    global_allocator().dealloc_pages(va, 1);
+    info!("Dealloc page: {:#x}", va);
+
+    info!("[rt_tour_1_2]: ok!");
+    axhal::misc::terminate();
+}
+```
+
+第6行：初始化动态内存分配器。
+
+第8~9行：验证String复合类型可用，说明了内核对字节分配的支持。
+
+第11~24行：验证按页进行内存分配的能力。中间的读写测试确认了对获得内存页的具有访问权。
+
+
+
+实际操作步骤：
 
 ```sh
 lk chroot rt_tour_1_2
@@ -595,21 +605,34 @@ lk prepare
 lk run
 ```
 
-预期输出：
-
-在执行axalloc::init()之后，可以使用rust的复合类型String，以及直接提出页分配的请求。如下
+看到输出信息：
 
 ```sh
-[  0.044782 axalloc:250]   use TLSF allocator.
-[  0.045994 axalloc:213] initialize global allocator at: [0xffffffc08026b000, 0xffffffc088000000)
-[  0.049591 rt_tour_1_2:19] Alloc string: Hello, axalloc!
-[  0.050173 rt_tour_1_2:20] [rt_tour_1_2]: ok!
-[  0.050685 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+[  0.050159 axalloc:250]   use TLSF allocator.
+[  0.051347 axalloc:213] initialize global allocator at: [0xffffffc08026b000, 0xffffffc088000000)
+[  0.054835 rt_tour_1_2:22] Alloc string: Hello, axalloc!
+[  0.055856 rt_tour_1_2:25] Alloc page: 0xffffffc080273000
+[  0.056664 rt_tour_1_2:37] Dealloc page: 0xffffffc080273000
+[  0.057241 rt_tour_1_2:39] [rt_tour_1_2]: ok!
+[  0.057749 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
-### 第五节 实验1.3 - 启用分页
+本节解决了动态内存分配的问题，为后面内核的开发过程建立了重要基础，下一节来处理内存管理的另一个重要方面 - 分页。
 
-先来建立分页机制的基本数据结构 - 页表和页表项，为后面正式启用分页做准备。
+
+
+### 第五节 实验1.3 - 分页管理
+
+在上一章的第五节 - 实验0.1中，我们已经看到过启用分页的那一步，即内核在刚启动时，就已经启用分页进入到了虚拟地址空间。但是当时只是固定映射了内核本身所在的1G空间。本节我们将支持完整的分页管理功能，完成两个任务：
+
+1. 重新建立地址空间映射：重点是把设备对应的MMIO区域映射进来，为后面支持PFlash和块设备驱动做准备。
+2. 支持对页表的动态映射：无论是宏内核本身还是应用，都有动态映射/解除映射的需求
+
+
+
+在进行实验任务之前，先来了解一下分页相关的原理知识。
+
+分页的基本数据结构包括：页表和页表项。页表可以多级嵌套，顶级为根页表。
 
 从根页表开始，每一级页表都占用一个内存页，关于内存页大小，我们采用最典型的4096字节。Sv39是针对64位系统的分页方案，即页表项长度是8字节，所以每个页表包含512个页表项。页表作为多级嵌套结构，由页表page_table和页表项page_table_entry两种基本元素交替构成，它们符合如下的模式：
 
@@ -659,38 +682,120 @@ flags从第10位往上是物理页帧号pfn，而低10位是页表项的属性�
 
 基于上述位，对外提供两个公开的复合标识。PAGE_KERNEL_RW作为默认的地址映射标识，表示映射的页面存在并可以读写；PAGE_KERNEL_RWX在此基础上增加执行权限。
 
-重建内核的地址空间。
+
+
+#### 重建内核的地址空间
+
+内核启动时，初次启用分页映射的地址空间从0x8000_0000开始，映射开放了所有权限，可以任意读写和执行，总共为1G。
+
+这1G空间对应于下图黄色、蓝色的全部和灰色的一部分，不包含绿色部分。
 
 <img src="./README.assets/image-20240624082241524.png" alt="image-20240624082241524" style="zoom:80%;" />
 
-对照第二章第一节建立的虚拟地址空间，重建后的虚拟地址空间有几个主要的变化。
+重建后的地址空间映射有几个主要的变化。
 
 1. SBI被从映射中去除了。SBI相当于上一级的bootloader，我们的内核必须通过SBI提供的sbi_ecall来调用它的功能，不应该看到SBI在地址空间中的映射区间。
 
 2. 内核本身的各个段，按照段的特点属性，进行精细化的映射。例如代码段.text的权限是只读和执行，而数据段.data就是读写。
 
-3. 内核自身空间之上的所有空闲区间，作为内核的堆空间，堆空间的上限是物理内存最高地址，上一章已经通过解析dtb获得。
+3. 内核自身空间之上的所有空闲区间，作为内核的堆空间，堆空间的上限是物理内存最高地址。
 4. 建立对设备地址区间的映射，主要是virtio-mmio各地址区间，为后面内核进行设备的发现与管理做准备。
 
-其中，上面第1条在重映射过程中忽略SBI占据区间即可；对第2、第3和第4，我们先定义好它们对应的一组地址区间，再进行重映射。
+
+
+#### 动态映射和解除映射
+
+建立动态映射实际包括两步：
+
+1. 通过动态内存管理的页分配服务申请内存页，获得其开始的物理地址。
+2. 递归页表找到目标页表项并填充，完成虚拟地址和物理地址的映射。
+
+把上述步骤封装到一个接口函数中，对应原型是：
+
+```rust
+fn map_region_and_fill(&mut self, va: VirtAddr, size: usize, flags: MappingFlags) -> PagingResult;
+```
+
+只需要指出要映射的虚拟地址区间范围和权限，其它操作的步骤和细节在内部处理。
+
+相应的解除映射，就是反向执行上述步骤，即清除目标页表项和释放对应的物理页。原型是：
+
+```rust
+fn unmap_region(&mut self, va: VirtAddr, size: usize) -> PagingResult<PhysAddr>;
+```
+
+只需要指出要解除的虚拟地址区间范围。
+
+
+
+看一下具体的实验(节选代码，完整代码路径tour_stage/rt_tour_1_3/src/main.rs)，主要注意三点：
+
+```rust
+#[no_mangle]
+pub extern "Rust" fn runtime_main(cpu_id: usize, dtb_pa: usize) {
+	... ...
+    // Alloc new pgd and setup.
+    let mut pgd = pgd_alloc();
+    unsafe {
+        write_page_table_root0(pgd.root_paddr().into());
+    }
+    
+    // Makesure that we can access pflash region.
+    let va = phys_to_virt(PFLASH_START.into()).as_usize();
+    let ptr = va as *const u32;
+    unsafe {
+        info!("Try to access dev region [{:#X}], got {:#X}", va, *ptr);
+        let magic = mem::transmute::<u32, [u8; 4]>(*ptr);
+        info!("Got pflash magic: {}", str::from_utf8(&magic).unwrap());
+    }
+
+    // Makesure that we can map a user-page and read/write/execute.
+    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE | MappingFlags::USER;
+    pgd.map_region_and_fill(USER_APP_ENTRY.into(), PAGE_SIZE_4K, flags).unwrap();
+	... ...
+    pgd.unmap_region_and_free(USER_APP_ENTRY.into(), PAGE_SIZE_4K).unwrap();
+	... ...
+}
+```
+
+第5~8行：初始的内核页表一旦完成初始化，就不允许再修改。所以动态申请了一个新的页表，第7行启用它作为当前页表。
+
+第11~17行：确认设备MMIO的地址空间已经被映射，并且可访问。这里直接检查的是PFlash，下一节我们就会用到它。
+
+第20~23行：验证动态映射和解除映射的功能。这里映射了一个用户页，下一节将用它来装载用户应用。
+
+
 
 实验步骤：
 
 ```sh
-lk chroot rt_page_table
+lk chroot rt_tour_1_3
 lk prepare
 lk run
 ```
 
-预期输出：
+在`lk prepare`这步，我们会发现一个新情况，工具自动在当前目录下创建了pflash.img，这是本实验必备的。在实验内核启动时，qemu把该image作为PFlash设备介质映射到对应的MMIO，以满足后续测试的进行。
 
-在执行page_table::init()之后，可以直接访问virtio-mmio的区域。此时可以禁用page_table的初始化，对比观察效果。
+
+
+屏幕输出：
 
 ```sh
-[  0.062865 rt_page_table:40] Try to access virtio_mmio [0x74726976]
-[  0.063595 rt_page_table:43] [rt_page_table]: ok!
-[  0.064128 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+[  0.057351 page_table::paging:77] CLONE: from 0xFFFFFFC08027A000 => 0xFFFFFFC080280000
+[  0.058646 rt_tour_1_3:34] Try to access dev region [0xFFFFFFC022000000], got 0x646C6670
+[  0.059772 rt_tour_1_3:36] Got pflash magic: pfld
+[  0.061228 rt_tour_1_3:42] Map user page: 0x1000 ok!
+[  0.062371 rt_tour_1_3:55] [rt_tour_1_3]: ok!
+[  0.063008 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
+
+第3行：读出PFlash区域头部信息，其中最前面的4个字节是magic，确认可以访问PFlash MMIO映射的区域。这个magic是我们在构造pflash.img的时候故意设置的，下一节来详细说明。
+
+第4行：为用户应用加载所准备的地址空间映射成功！
+
+到目前为止，实验内核已经具备了一定的基础功能，从下一节开始，我们就来加载应用并切换到用户态运行。
+
+
 
 ### 第六节 实验1.4 - 从PFlash加载应用
 
@@ -700,6 +805,57 @@ qemu的pflash原理。
 
 从pflash加载应用到用户空间的x01000（预先在实验1.3进行了分配）。实验前后可读。开启SUM。
 
+
+
+本实验的主要内容：
+
+```rust
+const USER_APP_ENTRY: usize = 0x1000;
+
+pub fn load(pgd: &mut PageTable) {
+    let result = pflash::load_next(None);
+    assert!(result.is_some());
+    let (va, size) = result.unwrap();
+    info!("Got pflash payload: pos {:#x} size {}", va, size);
+    let load_code = unsafe { core::slice::from_raw_parts(va as *const _, size) };
+
+    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE | MappingFlags::USER;
+    pgd.map_region_and_fill(USER_APP_ENTRY.into(), PAGE_SIZE_4K, flags).unwrap();
+    info!("Map user page: {:#x} ok!", USER_APP_ENTRY);
+
+    let run_code = unsafe { core::slice::from_raw_parts_mut(USER_APP_ENTRY as *mut u8, size) };
+    run_code.copy_from_slice(load_code);
+    info!("App code: {:?}", &run_code[0..size]);
+    pgd.unmap_region_and_free(USER_APP_ENTRY.into(), PAGE_SIZE_4K).unwrap();
+}
+```
+
+
+
+
+
+实验步骤：
+
+```sh
+lk chroot tour_1_4
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+```sh
+[  0.058336 rt_tour_1_4:17] [rt_tour_1_4]: ...
+[  0.059240 page_table::paging:77] CLONE: from 0xFFFFFFC08027A000 => 0xFFFFFFC080280000
+[  0.060300 rt_tour_1_4::userboot:15] Got pflash payload: pos 0xffffffc022000010 size 34
+[  0.061994 rt_tour_1_4::userboot:20] Map user page: 0x1000 ok!
+[  0.062642 rt_tour_1_4::userboot:25] App code: [2, 144, 147, 8, 240, 3, 115, 0, ... ...]
+[  0.064623 rt_tour_1_4:28] [rt_tour_1_4]: ok!
+[  0.065143 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+
+
 ### 第七节 实验1.5 - 返回用户态执行应用
 
 制造context，返回用户态。
@@ -708,11 +864,209 @@ qemu的pflash原理。
 
 <img src="./README.assets/image-20240624105512989.png" alt="image-20240624105512989" style="zoom: 50%;" />
 
+实验代码：
+
+```rust
+pub fn start() {
+    // Prepare kernel stack
+    let ksp = global_allocator().alloc_pages(1, PAGE_SIZE_4K).unwrap();
+    info!("Alloc page: {:#x}", ksp);
+
+    let pt_regs = ksp + PAGE_SIZE_4K - TRAPFRAME_SIZE;
+    start_thread(pt_regs, USER_APP_ENTRY, 0);
+    axhal::arch::ret_from_fork(pt_regs);
+}
+```
+
+
+
+实验步骤：
+
+```sh
+lk chroot rt_tour_1_5
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+```sh
+[  0.055375 rt_tour_1_5::userboot:18] Got pflash payload: pos 0xffffffc022000010 size 34
+[  0.057081 rt_tour_1_5::userboot:23] Map user page: 0x1000 ok!
+[  0.057725 rt_tour_1_5::userboot:28] App code: [2, 144, 147, 8, 240, 3, 115, 0, ... ...]
+[  0.059456 rt_tour_1_5::userboot:34] Alloc page: 0xffffffc080284000
+[  0.060250 rt_tour_1_5::trap:14] As expected: NO trap handler!
+[  0.060842 rt_tour_1_5::trap:15] [rt_tour_1_5]: ok!
+[  0.061388 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+
+
 ### 第八节 实验1.6 - 响应异常系统调用和中断
 
 初始化异常响应框架。依次响应ebreak异常和write系统调用。
 
 开中断，通过read系统调用获取中断次数。
+
+
+
+用户态应用的实现：
+
+```rust
+// payload/origin/src/main.rs
+#[no_mangle]
+unsafe extern "C" fn _start() -> ! {
+    core::arch::asm!(
+        "ebreak",
+"1:",
+        "li a7, 63",
+        "ecall",
+        "li t0, 1",
+        "ble a0, t0, 1b",
+        "li a7, 64",
+        "ecall",
+        "li a7, 93",
+        "ecall",
+        options(noreturn)
+    )
+}
+```
+
+
+
+
+
+实验代码：
+
+```rust
+pub fn init() {
+    excp::init();
+    syscall::init();
+    irq::init();
+
+    unsafe {
+        stvec::write(trap_vector_base as usize, stvec::TrapMode::Direct)
+    }
+}
+```
+
+
+
+excp的实现：
+
+```rust
+pub fn handle_breakpoint(sepc: &mut usize) {
+    info!("Exception(Breakpoint) @ {:#x} ", sepc);
+    *sepc += 2
+}
+```
+
+
+
+irq的实现：
+
+```rust
+/// Call the external IRQ handler.
+pub fn handle(irq_num: usize, _tf: &mut TrapFrame) {
+    // Todo: With NoPreempt
+    if irq_num == S_TIMER {
+        info!("==> Got irq[S_TIMER]");
+        update_timer();
+        TICKS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn get_ticks() -> usize {
+    TICKS.load(Ordering::Relaxed)
+}
+
+fn update_timer() {
+    // Setup timer interrupt handler
+    const PERIODIC_INTERVAL_NANOS: u64 =
+        axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64 / 10;
+
+    static mut NEXT_DEADLINE: u64 = 0;
+
+    let now_ns = axhal::time::current_time_nanos();
+    // Safety: we have disabled preemption in IRQ handler.
+    let mut deadline = unsafe { NEXT_DEADLINE };
+    if now_ns >= deadline {
+        deadline = now_ns + PERIODIC_INTERVAL_NANOS;
+    }
+    unsafe { NEXT_DEADLINE = deadline + PERIODIC_INTERVAL_NANOS };
+    axhal::time::set_oneshot_timer(deadline);
+}
+```
+
+
+
+syscall的实现：
+
+```rust
+pub fn handle(tf: &mut TrapFrame) {
+    // Note: "tf.sepc += 4;" must be put before do_syscall. Or:
+    // E.g., when we do clone, child task will call clone again
+    // and cause strange behavior.
+    tf.sepc += 4;
+    tf.regs.a0 = do_syscall(tf.regs.a7, tf.regs.a0);
+}
+
+fn do_syscall(sysno: usize, arg0: usize) -> usize {
+    match sysno {
+        SYS_READ => {
+            let ticks = get_ticks();
+            info!("Syscall(Read): ticks [{}]", ticks);
+            ticks
+        },
+        SYS_WRITE => {
+            let ticks = get_ticks();
+            info!("Syscall(Write): ticks [{}:{}]", arg0, ticks);
+            0
+        },
+        SYS_EXIT => {
+            info!("Syscall(Exit): system is exiting ...");
+            info!("[rt_tour_1_6]: ok!");
+            axhal::misc::terminate();
+        },
+        _ => {
+            panic!("Bad sysno: {}", sysno);
+        }
+    }
+}
+```
+
+
+
+
+
+实验步骤：
+
+```sh
+lk chroot rt_tour_1_6
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+```sh
+[  0.058687 rt_tour_1_6::userboot:18] Got pflash payload: pos 0xffffffc022000010 size 34
+[  0.060436 rt_tour_1_6::userboot:23] Map user page: 0x1000 ok!
+[  0.061117 rt_tour_1_6::userboot:28] App code: [2, 144, 147, 8, 240, 3, 115, 0, ... ...]
+[  0.062950 rt_tour_1_6::userboot:34] Alloc page: 0xffffffc080286000
+[  0.063906 rt_tour_1_6::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.064763 rt_tour_1_6::trap::excp:2] Exception(Breakpoint) @ 0x1000
+[  0.065437 rt_tour_1_6::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.066300 rt_tour_1_6::trap::syscall:20] Syscall(Read): ticks [2]
+[  0.066876 rt_tour_1_6::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.067542 rt_tour_1_6::trap::syscall:25] Syscall(Write): ticks [2:3]
+[  0.068119 rt_tour_1_6::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.068803 rt_tour_1_6::trap::syscall:29] Syscall(Exit): system is exiting ...
+[  0.069484 rt_tour_1_6::trap::syscall:30] [rt_tour_1_6]: ok!
+[  0.070113 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+
 
 ### 本章总结
 
@@ -810,6 +1164,39 @@ impl<T> Drop for SpinNoIrqGuard<T> {
 
 测试一下自旋锁的功能。测试成功！
 
+
+
+实验步骤：
+
+```sh
+lk chroot rt_tour_2_1
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+```sh
+[  0.061324 rt_tour_2_1::userboot:17] Got pflash payload: pos 0xffffffc022000010 size 34
+[  0.063038 rt_tour_2_1::userboot:25] Map user page: 0x1000 ok!
+[  0.063716 rt_tour_2_1::userboot:30] App code: [2, 144, 147, 8, ... ...]
+[  0.065551 rt_tour_2_1::userboot:36] Alloc page: 0xffffffc0802e6000
+[  0.066522 rt_tour_2_1::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.067374 rt_tour_2_1::trap::excp:2] Exception(Breakpoint) @ 0x1000
+[  0.068349 rt_tour_2_1::trap::syscall:20] Syscall(Read): ticks [1]
+[  0.068930 rt_tour_2_1::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.069435 rt_tour_2_1::trap::syscall:20] Syscall(Read): ticks [2]
+[  0.070135 rt_tour_2_1::trap::syscall:25] Syscall(Write): ticks [2:2]
+[  0.070710 rt_tour_2_1::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.071414 rt_tour_2_1::trap::syscall:29] Syscall(Exit): system is exiting ...
+[  0.072107 rt_tour_2_1::trap::syscall:30] [rt_tour_2_1]: ok!
+[  0.072740 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+单从信息输出来看，本实验的输出与上一章的最后一个实验1.6完全相同。但是从实现的角度，本实验增加了对同步和任务的支持，这为下一节支持多线程并发奠定了基础。
+
+
+
 ### 第四节 实验2.2 - 运行任务队列
 
 在现代操作系统中，多任务支持是基本功能。对我们的内核来说，上层应用可以开启多任务，同时执行多条相对独立的逻辑流程；内核内部同样可以开启多任务，并发完成一些维护性的工作。无论在哪一个层面，合理的多任务调度都可以带来整体效率上的提升。
@@ -830,6 +1217,43 @@ impl<T> Drop for SpinNoIrqGuard<T> {
 **调度(Sched)** - 调度是当资源不足时，协调每个请求对资源使用的方法。通常，每个任务都在尽力争取获得更多的计算资源 - 其实就是CPU时间，但是CPU无论从数量还是算力常常是处于相对不足的状态的，这就需要协调好有限CPU资源在各个任务之间的分配。协调的好，系统整体效率有保证；协调的不好，系统效率下降甚至卡死。
 
 在ArceOS的语境下，任务等价于线程。也就是说，每个任务拥有**独立的执行流**和**独立的栈**，但是它们没有独立的地址空间，而是共享唯一的内核地址空间。对于调度，我们需要更多的去参考线程调度方面的历史经验。
+
+
+
+实验步骤：
+
+```sh
+lk chroot rt_tour_2_2
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+```sh
+[  0.069569 run_queue::run_queue:49] task spawn: 2
+[  0.071123 run_queue::run_queue:187] ============ context switch: 0 -> 2
+[  0.071948 run_queue::run_queue:208] ###### 1 0;
+[  0.072623 taskctx:295] CurrentCtx::set_current 0 -> 2...
+[  0.073492 run_queue:75] ################ task_entry ...
+[  0.074304 rt_tour_2_2::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.075164 rt_tour_2_2:31] Wander kernel-thread is running ..
+[  0.075766 rt_tour_2_2:34] Wander kernel-thread yields itself ..
+[  0.076340 rt_tour_2_2::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.076955 run_queue::run_queue:187] ============ context switch: 2 -> 0
+[  0.077627 taskctx:295] CurrentCtx::set_current 2 -> 0...
+... ...
+[  0.088258 rt_tour_2_2::trap::syscall:30] [rt_tour_2_2]: ok!
+[  0.088918 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+第2行：从0号线程切换到2号线程。
+
+第3~9行：2号线程wander完成自身工作。
+
+第10行：从2号线程返回到0号线程继续执行。
+
+本节，我们首次实现了多线程任务的并发。下一节，我们将创建一个用户线程即1号线程，然后把userboot的功能从0号迁移到1号线程中，0号线程退化为idle，仅在没有其它线程时才运行，以维持系统的待命状态。
 
 
 
@@ -876,6 +1300,39 @@ lk run
 
 
 
+实验步骤：
+
+```sh
+lk chroot rt_tour_2_3
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+```sh
+[  0.063019 run_queue::run_queue:49] task spawn: 1
+[  0.064038 run_queue::run_queue:49] task spawn: 2
+[  0.065427 run_queue::run_queue:187] ============ context switch: 0 -> 1
+[  0.066169 run_queue::run_queue:208] ###### 0 0;
+[  0.066778 taskctx:295] CurrentCtx::set_current 0 -> 1...
+
+[  0.078061 run_queue::run_queue:187] ============ context switch: 1 -> 2
+[  0.078612 run_queue::run_queue:208] ###### 1 0;
+[  0.079079 taskctx:295] CurrentCtx::set_current 1 -> 2...
+[  0.079559 run_queue:75] ################ task_entry ...
+[  0.080065 rt_tour_2_3::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.080704 rt_tour_2_3:42] Wander kernel-thread is running ..
+[  0.081313 rt_tour_2_3:45] Wander kernel-thread yields itself ..
+[  0.081822 rt_tour_2_3::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.082378 run_queue::run_queue:187] ============ context switch: 2 -> 1
+[  0.083038 taskctx:295] CurrentCtx::set_current 2 -> 1...
+```
+
+
+
+
+
 ### 第六节 实验2.4 - 抢占式调度
 
 抢占是操作系统调度方面的一个基本概念，通常是指，高优先级的任务可以抢占正在运行的低优先级任务的执行权。但是在各种操作系统设计的具体实践上，它们的具体策略、具体设计与实现方式存在差异。这一节，先来澄清ArceOS中，任务抢占采取的具体策略与方式。这个抢占机制有以下几个特点：
@@ -902,6 +1359,30 @@ lk run
 
 
 
+实验步骤：
+
+```sh
+lk chroot rt_tour_2_4
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+```sh
+[  0.077701 rt_tour_2_4::userboot:40] Alloc page: 0xffffffc080369000
+[  0.078641 rt_tour_2_4::trap::excp:2] Exception(Breakpoint) @ 0x1000
+[  0.080686 rt_tour_2_4::trap::syscall:20] Syscall(Read): ticks [24]
+[  0.082678 rt_tour_2_4::trap::syscall:25] Syscall(Write): ticks [24:26]
+[  0.084711 rt_tour_2_4::trap::syscall:29] Syscall(Exit): system is exiting ...
+[  0.085369 rt_tour_2_4::trap::syscall:30] [rt_tour_2_4]: ok!
+[  0.086015 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+在内核线程wander陷入无限循环且没有主动让出执行权的情况下，我们的用户线程依然完成的工作。这得益于抢占式调度机制的作用，它确保了所有线程都可以得到运行的机会，整个内核系统不会被少数异常线程拖垮。
+
+
+
 ### 第七节 实验2.5 - 等待与唤醒
 
 关于任务退出与等待其它任务退出的问题，这个问题的复杂性在于：任务有两个角色，一方面任务一定会在某个时刻退出，另一方面某个任务可能在运行中阻塞等待另一个任务的退出。关系如下：
@@ -923,7 +1404,38 @@ lk run
 
 
 
-### 第八节 实验2.6 - 应用睡眠与退出
+实验步骤：
+
+```sh
+lk chroot rt_tour_2_5
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+```sh
+[  0.076197 rt_tour_2_5:41] App kernel-thread waits for wanderer to notify ..
+[  0.076989 run_queue::run_queue:123] task block: 1
+[  0.077773 run_queue::run_queue:187] ============ context switch: 1 -> 2
+[  0.078746 taskctx:295] CurrentCtx::set_current 1 -> 2...
+[  0.079767 rt_tour_2_5:53] Wander kernel-thread is running ..
+[  0.080341 rt_tour_2_5:54] Wander kernel-thread waits for app to be ready ..
+[  0.081014 rt_tour_2_5:58] Wander notifies app ..
+[  0.081652 run_queue::run_queue:138] task unblock: 1
+[  0.082254 rt_tour_2_5::trap::irq:20] ==> Got irq[S_TIMER]
+[  0.083031 run_queue::run_queue:75] state: Running
+[  0.083634 run_queue::run_queue:85] current task is to be preempted: 2, allow=true
+[  0.084534 run_queue::run_queue:187] ============ context switch: 2 -> 1
+[  0.085166 taskctx:295] CurrentCtx::set_current 2 -> 1...
+[  0.085780 rt_tour_2_5:46] App kernel-thread is starting ..
+```
+
+
+
+
+
+### 第八节 实验2.6 - 应用的睡眠与退出
 
 实验预期输出：
 
@@ -935,6 +1447,18 @@ lk run
 [  0.040092 rt_mutex:37] 0
 [  0.040629 rt_mutex:40] [rt_mutex]: ok!
 ```
+
+
+
+实验步骤：
+
+```sh
+lk chroot rt_tour_2_6
+lk prepare
+lk run
+```
+
+屏幕输出：
 
 
 
@@ -979,6 +1503,18 @@ lk run
 
 
 
+实验步骤：
+
+```sh
+lk chroot rt_tour_3_1
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
+
 ### 第四节 实验3.2 - VirtioBlk块设备驱动
 
 实验步骤：
@@ -991,6 +1527,20 @@ lk run
 预期输出：
 
 成功读写块。
+
+
+
+实验步骤：
+
+```sh
+lk chroot rt_tour_3_2
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
 
 ### 第五节 实验3.3 - 文件系统展开
 
@@ -1016,9 +1566,35 @@ lk run
 
 
 
+实验步骤：
+
+```sh
+lk chroot rt_tour_3_3
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
+
 ### 第六节 实验3.4 - 从文件系统加载应用
 
 替换pflash方式。
+
+
+
+实验步骤：
+
+```sh
+lk chroot rt_tour_3_4
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
 
 ### 本章总结
 
@@ -1052,6 +1628,18 @@ XXX
 
 XXX
 
+实验步骤：
+
+```sh
+lk chroot rt_tour_4_1
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
+
 ### 第四节 实验4.2 - 创建进程级任务
 
 
@@ -1075,7 +1663,33 @@ Fork系统以克隆的方式产生新的用户进程，它的上级使用者包�
 2. wakeup：把新进程的task投递到runq，等待调度。注：fork流程中不包括调度，因此并不真正启动新进程。
 3. ret from fork：从内核态返回到用户态的一系列特殊动作。因为是新产生的进程，与一般返回用户态的动作流程有一定区别。
 
+
+
+实验步骤：
+
+```sh
+lk chroot rt_tour_4_2
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
+
 ### 第五节 实验4.3 - 地址空间映射mmap
+
+实验步骤：
+
+```sh
+lk chroot rt_tour_4_3
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
 
 实验步骤：(待补充)
 
@@ -1113,6 +1727,18 @@ lk run
 
 
 
+实验步骤：
+
+```sh
+lk chroot rt_tour_4_4
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
+
 ### 本章总结
 
 XXX
@@ -1143,6 +1769,18 @@ XXX
 
 XXX
 
+实验步骤：
+
+```sh
+lk chroot rt_tour_5_1
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
+
 ### 第四节 实验5.2 - 准备用户应用地址空间
 
 <img src="./README.assets/image-20240624105611245.png" alt="image-20240624105611245" style="zoom:80%;" />
@@ -1154,13 +1792,51 @@ leader组件bprm_loader基于应用程序重置当前进程的地址空间。在
 3. 通过mmap把标记为LOAD的各段映射到当前进程地址空间的指定位置。
 4. 通过userstack构造用户栈，映射到当前进程的地址空间。
 
+
+
+实验步骤：
+
+```sh
+lk chroot rt_tour_5_2
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
+
 ### 第五节 实验5.3 - 特权级切换启动应用
 
 XXX
 
+实验步骤：
+
+```sh
+lk chroot rt_tour_5_3
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
+
 ### 第六节 实验5.4 - 支持GLibc和应用的系统调用
 
 XXX
+
+实验步骤：
+
+```sh
+lk chroot rt_tour_5_4
+lk prepare
+lk run
+```
+
+屏幕输出：
+
+
 
 ### 本章总结
 
@@ -1189,6 +1865,10 @@ xxx
 xxx
 
 ### 第五节 实验6.3 - ProcFS
+
+xxx
+
+### 第六节 实验6.4 - 多核支持
 
 xxx
 
