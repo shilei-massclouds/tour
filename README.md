@@ -1165,69 +1165,134 @@ lk run
 
 ### 第三节 实验2.1 - 自旋锁和初始线程
 
-在我们大部分的实验过程中，宏内核始终在单CPU上运行，这就意味着：目前我们的程序中**不存在并行**，但是即使对于并发环境，仍然需要同步互斥的支持。
+本节目标：为支持线程级多任务建立基础，启用自旋锁并建立最初的任务。
 
-1. 当正常执行程序时，会随时被外部的中断而打断运行，然后就会去执行响应中断的例程。中断是随机不可预测的，这样有可能会把原本处于临界区中一组操作打断，破坏它们的原子性、事务性。
-2. 后面的实验主要基于时钟中断支持下的抢占式的并发，即任务调度可能随时发生，调度时或许当前任务正好处于临界区中，这样就可能在访问共享资源方面产生冲突。
+> 在本系列实验中，线程和任务的说法可以互换；而进程，可以视为共享同一地址空间的一组线程。
 
-为了杜绝上述两种可能性，我们需要构建自旋锁。根据上面分析的两点，单核情况下，中断是破坏临界区访问的主要因素，所以我们只要在正常锁操作基础上，关闭中断即可。
 
-定义自旋锁SpinNoIrq和对应的guard变量：
+
+宏内核如果仅在单CPU上运行，这就意味着**不存在并行**。但是仍然会面对**并发**的情况：
+
+1. 中断：当正常执行程序时，会随时被外部的中断而打断运行，然后就会去执行响应中断的例程。中断是随机不可预测的，这样有可能会把原本处于临界区中一组操作打断，破坏它们的原子性、事务性。
+2. 多线程：后面的实验会启用多任务和抢占式调度策略，如果不加控制，调度可能发生在临界区中。
+
+为了防止上述情况造成破坏，我们启用自旋锁。
+
+在本节实验中，我们使用的自旋锁会在正常锁操作基础上，关闭中断，以保证锁的有效性。后面到第六节启用抢占后，自旋锁会进一步的在锁期间关闭抢占。自旋锁的实现可以参考spinbase目录下的代码。下面重点说明初始的线程任务。
+
+先来看一下任务的概念：
+
+**任务(Task)** - 任务是被调度的对象，它具有独立的工作逻辑。任务的核心构成要素包括：
+
+1. 执行流：任务自身的工作逻辑，是一组可执行的指令序列。任务启动时，从任务入口entry开始执行指令流；任务执行过程中，CPU的指令指针寄存器**PC**总是指向本任务执行流的当前指令。
+2. 栈：在函数调用机制中，维护任务的当前状态。我们的内核是Unikernel形态，它只有内核态，所以我们也只考虑内核栈kstack。
+3. 上下文存储区：上下文是调度的重点，后面第五节专门展开讨论。
+4. 状态：有如下四个基本的调度状态。调度过程中，需要随时跟踪和更新任务的状态，作为管理任务的基础。
+
+<img src="./README.assets/image-20240624091504645.png" alt="image-20240624091504645" style="zoom: 45%;" />
+
+把当前执行的唯一线程封装为初始任务有两个目的：
+
+1. 建立以任务复制为基础的新任务创建方式：即新的任务总是以一个现有任务为模板，有选择的复制或共享其资源而形成。当前这个唯一的任务就是最早的“始祖”任务。
+2. 统一管理和调度：当前正在执行的指令流本身就是一个线程，将来它会作为Idle线程参与到系统的调度机制中。
+
+看一下任务的结构定义：
 
 ```rust
-pub struct SpinNoIrq<T> {
-    data: UnsafeCell<T>,
+pub struct SchedInfo {
+    tid:    Tid,
+    tgid:   Tid,
+
+    pub flags: usize,
+
+    pub real_parent:   Option<Arc<SchedInfo>>,
+    pub group_leader:  Option<Arc<SchedInfo>>,
+
+    pub children: SpinNoIrq<Vec<Tid>>,
+    pub siblings: SpinNoIrq<Vec<Tid>>,
+
+    pub set_child_tid: usize,
+    pub clear_child_tid: usize,
+
+    pub pgd: Option<Arc<SpinNoIrq<PageTable>>>,
+    pub mm_id: AtomicUsize,
+    pub active_mm_id: AtomicUsize,
+
+    pub entry: Option<*mut dyn FnOnce()>,
+    pub kstack: Option<TaskStack>,
+    state: AtomicU8,
+    in_wait_queue: AtomicBool,
+
+    need_resched: AtomicBool,
+    preempt_disable_count: AtomicUsize,
+
+    /* CPU-specific state of this task: */
+    pub thread: UnsafeCell<TaskContext>,
 }
+```
 
-pub struct SpinNoIrqGuard<T> {
-    irq_state: usize,
-    data: *mut T,
-}
+任务是被调度的单位，命名为SchedInfo，包含了与调用相关的各种信息，当前先关注以下几个成员。
 
-unsafe impl<T> Sync for SpinNoIrq<T> {}
-unsafe impl<T> Send for SpinNoIrq<T> {}
+第2行：tid，线程ID或任务ID。
 
-impl<T> SpinNoIrq<T> {
-    #[inline(always)]
-    pub const fn new(data: T) -> Self {
-        Self {
-            data: UnsafeCell::new(data),
-        }
+第21行：kstack，任务的内核栈。
+
+第29行：thread，调度上下文，这个与体系结构相关。
+
+
+
+把初始线程封装为任务的过程在taskctx::init()中：
+
+```rust
+static INIT_THREAD: LazyInit<CtxRef> = LazyInit::new();
+
+pub fn init(cpu_id: usize, dtb_pa: usize) {
+	... ...
+    let ctx = Arc::new(SchedInfo::new());
+    INIT_THREAD.init_by(ctx);
+
+    let ptr = Arc::into_raw(INIT_THREAD.clone());
+    unsafe {
+        axhal::cpu::set_current_task_ptr(ptr);
     }
 }
 ```
 
-加锁时，关中断：
+第5~6行：用一个全局变量INIT_THREAD来维护初始线程任务。
+
+第8~10行：把初始任务设置为当前任务，从此之后，可以在任意位置调用`taskctx::current_ctx()`获得当前任务。
+
+
+
+下面是我们的实验代码：
 
 ```rust
-impl<T> SpinNoIrq<T> {
-    #[inline(always)]
-    pub fn lock(&self) -> SpinNoIrqGuard<T> {
-        let irq_state = NoPreemptIrqSave::acquire();
-        SpinNoIrqGuard {
-            irq_state,
-            data: unsafe { &mut *self.data.get() },
-        }
+use spinbase::SpinNoIrq;
+
+#[no_mangle]
+pub extern "Rust" fn runtime_main(cpu_id: usize, dtb_pa: usize) {
+	... ...
+    // Alloc new pgd and setup.
+    let pgd = Arc::new(SpinNoIrq::new(pgd_alloc()));
+    unsafe {
+        write_page_table_root0(pgd.lock().root_paddr().into());
     }
+
+    taskctx::init(cpu_id, dtb_pa);
+    let mut ctx = taskctx::current_ctx();
+    assert!(ctx.pgd.is_none());
+    ctx.as_ctx_mut().set_mm(1, pgd);
+    ... ...
 }
 ```
 
-析构时，恢复中断：
+第12~13行：如上所述，第12行内含把初始线程封装为任务的过程，所以第13行就可以获得对它的引用。
 
-```rust
-impl<T> Drop for SpinNoIrqGuard<T> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        NoPreemptIrqSave::release(self.irq_state);
-    }
-}
-```
-
-测试一下自旋锁的功能。测试成功！
+第15行：把创建的根页表交给当前任务来管理。任务才是调用的目标，将来我们调度任务时，调度机制会根据情况自动决定是否切换页表。
 
 
 
-实验步骤：
+运行一下本节的实验：
 
 ```sh
 lk chroot rt_tour_2_1
@@ -1254,34 +1319,62 @@ lk run
 [  0.072740 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
-单从信息输出来看，本实验的输出与上一章的最后一个实验1.6完全相同。但是从实现的角度，本实验增加了对同步和任务的支持，这为下一节支持多线程并发准备了条件。
+单从信息输出来看，本实验的输出与上一章的最后一个实验1.6完全相同。但是从内部实现的角度，本实验增加了对同步和任务的支持，这为下一节支持多线程并发准备了条件。
 
 
 
 ### 第四节 实验2.2 - 运行任务队列
 
+本节目标：创建一个内核线程，首次支持多线程并发。
+
 在现代操作系统中，多任务支持是基本功能。对我们的内核来说，上层应用可以开启多任务，同时执行多条相对独立的逻辑流程；内核内部同样可以开启多任务，并发完成一些维护性的工作。无论在哪一个层面，合理的多任务调度都可以带来整体效率上的提升。
-
-在多任务方面，任务与调度是两个核心的概念。
-
-**任务(Task)** - 任务是被调度的对象，它具有独立的工作逻辑。任务的核心构成要素包括：
-
-1. 执行流：任务自身的工作逻辑，是一组可执行的指令序列。任务启动时，从任务入口entry开始执行指令流；任务执行过程中，CPU的指令指针寄存器**PC**总是指向本任务执行流的当前指令。
-2. 栈：在函数调用机制中，维护任务的当前状态。我们的内核是Unikernel形态，它只有内核态，所以我们也只考虑内核栈kstack。
-3. 上下文存储区：上下文是本节的重点，下面专门展开讨论。
-4. 状态：有如下四个基本的调度状态。调度过程中，需要随时跟踪和更新任务的状态，作为管理任务的基础。
-
-<img src="./README.assets/image-20240624091504645.png" alt="image-20240624091504645" style="zoom: 45%;" />
-
-
 
 **调度(Sched)** - 调度是当资源不足时，协调每个请求对资源使用的方法。通常，每个任务都在尽力争取获得更多的计算资源 - 其实就是CPU时间，但是CPU无论从数量还是算力常常是处于相对不足的状态的，这就需要协调好有限CPU资源在各个任务之间的分配。协调的好，系统整体效率有保证；协调的不好，系统效率下降甚至卡死。
 
-在ArceOS的语境下，任务等价于线程。也就是说，每个任务拥有**独立的执行流**和**独立的栈**，但是它们没有独立的地址空间，而是共享唯一的内核地址空间。对于调度，我们需要更多的去参考线程调度方面的历史经验。
+调用机制依赖于两个基础：任务和运行队列。
+
+上一节我们讨论了任务，并把当前唯一的线程封装成为首个任务。本节重点看一下运行队列runq。
+
+实际上，调度的原理可以用下面的图来简单说明：
+
+<img src="./README.assets/调度原理与概念.svg" alt="img" style="zoom:80%;" />
+
+任务在当前任务指针（左侧）于运行队列（右侧）之间进行交换。
+
+当前任务指针指向的是正被CPU执行的任务，有且仅有一个。而运行队列维护着就绪的任务，可以有任意多个。
+
+二者之间交换的时机和从运行队列选择下一个任务的方式，由策略决定。
 
 
 
-实验步骤：
+下面来看一下本节的实验，我们新增一个称为Wanderer的内核线程任务，与初始线程任务搭配来实验调度过程。
+
+```rust
+#[no_mangle]
+pub extern "Rust" fn runtime_main(cpu_id: usize, dtb_pa: usize) {
+	... ...
+    run_queue::init(cpu_id, dtb_pa);
+
+    let ctx = run_queue::spawn_task_raw(2, PF_KTHREAD, || {
+        info!("Wander kernel-thread is running ..");
+        info!("Wander kernel-thread yields itself ..");
+        run_queue::yield_now();
+    });
+    run_queue::activate_task(ctx.clone());
+    run_queue::yield_now();
+	... ...
+}
+```
+
+第6~11行：创建一个内核线程任务，它只是在输出信息就让出执行权 。然后投入运行队列。
+
+第12行：关键，上述任务是由当前初始任务创建和投入运行队列的，但是还没有得到运行机会。当前初始任务必须主动执行一次yield让出执行权，让内核线程得以被真正调度。
+
+> yield_now本质上就是主动触发一次调度，将在下一节协作式调度中介绍。
+
+
+
+下面执行实验步骤，来看一下实际的调度过程：
 
 ```sh
 lk chroot rt_tour_2_2
@@ -1308,27 +1401,25 @@ lk run
 [  0.088918 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
-第2行：从0号线程切换到2号线程。
+第2行：从0号线程切换到2号线程wander。
 
 第3~9行：2号线程wander完成自身工作。
 
 第10行：从2号线程返回到0号线程继续执行。
 
-本节，我们首次实现了多线程任务的并发。下一节，我们将创建一个用户线程即1号线程，然后把userboot的功能从0号迁移到1号线程中，0号线程退化为idle，仅在没有其它线程时才运行，以维持系统的待命状态。
+本节我们首次实现了多线程任务的并发。下一节，内核将从两个线程变为三个线程，并重点说明调度的底层机制。
 
 
 
 ### 第五节 实验2.3 - 协作式调度
 
+本节目标：首先介绍调度的底层原理；然后扩展上节的实验：创建一个用户线程即1号线程，然后把userboot的功能从0号迁移到1号线程中，0号线程退化为idle，仅在没有其它线程时才运行，以维持系统的待命状态。目前各个线程任务之间仅仅通过主动yield来形成协作，称协作式调度。
+
+说明调度的底层原理之前，先来看一下关键概念上下文。
+
 **上下文(Contex或ctx)** - 有些书中也称环境上下文。理解这个概念是理解调度的关键。我们可以把内核系统看作是一个状态机，大多数时间内它在执行任务；某种条件下当前任务会暂停然后切换到另一个任务；触发异常时它会暂停任务转而去处理异常；外部中断同样会打断它的当前工作转而去响应中断。内核状态机会不停的在这几种状态中切换。我们把这几种状态称之为**上下文**，把上述状态的切换称为**上下文切换**。
 
-在特定的体系结构下，上下文的具体表现形式是一组必要的寄存器状态再加上地址空间，上下文切换则基于对寄存器组状态的保存与恢复以及地址空间的切换。但由于我们实验的操作系统是Unikernel模式，只有唯一的地址空间，不存在地址空间切换的问题，所以所谓上下文就仅包含寄存器状态。
-
-在我们的实验内核中，上下文归纳为两类：任务上下文和异常/中断上下文。本章重点讨论的是任务上下文的概念与实现，而对于异常/中断上下文只是简单说明，下一章专门讨论它的具体机制与实现。
-
-
-
-上面描述了一大堆概念都比较抽象，下面通过一个示例来说明这些概念：
+在特定的体系结构下，上下文的具体表现形式是一组必要的寄存器状态再加上地址空间，上下文切换则基于对寄存器组状态的保存与恢复以及地址空间的切换。在我们的实验内核中，上下文归纳为两类：任务上下文和异常/中断上下文。
 
 <img src="./README.assets/任务生命周期-1719191748911-3.svg" alt="任务生命周期" style="zoom:80%;" />
 
@@ -1342,24 +1433,42 @@ lk run
 
 
 
+本章重点讨论的是任务上下文的概念与实现，而对于异常/中断上下文只是简单说明，后面专门讨论它的具体机制与实现。
+
+下面看一下如何基于任务上下文的切换来完成调度，这是通过一个特殊函数context_switch实现的：
+
 <img src="./README.assets/image-20240624091709635.png" alt="image-20240624091709635" style="zoom: 50%;" />
 
 ra寄存器是函数返回后要执行的下一条指令地址，对它进行切换的效果：context_switch返回后**竟然**不是返回到原任务执行流，而是返回到另一个执行流中；sp寄存器指向栈，它保持了函数压栈的信息，所以在执行流切换的同时，栈也必须同步切换；s0~s11是按照Riscv规范必须由被调用者负责保存的寄存器，因此一并放到上下文中随任务切换。
 
 简单总结一下，context_switch(...)是一个非常特殊的函数，当前任务在进入函数后，内部**可能**进行任务上下文的切换，等函数返回时，继续执行的**可能**是另一个任务。
 
-实验步骤：
 
-```sh
-lk chroot rt_run_queue
-lk run
+
+本节的实验代码：
+
+```rust
+#[no_mangle]
+pub extern "Rust" fn runtime_main(cpu_id: usize, dtb_pa: usize) {
+    let ctx = run_queue::spawn_task_raw(1, 0, move || {
+        // Prepare for user app to startup.
+        userboot::init(cpu_id, dtb_pa);
+        info!("App kernel-thread is running ..");
+        // Load userland app into pgd.
+        userboot::load();
+        run_queue::yield_now();
+        // Start userland app.
+        userboot::start();
+        userboot::cleanup();
+        info!("App kernel-thread yields itself ..");
+        run_queue::yield_now();
+    });
+    run_queue::activate_task(ctx.clone());
+	... ...
+}
 ```
 
-预期输出：
-
-构造内核线程级任务，并在runq中成功切换和退出。
-
-
+相对上节的实验，新建了一个1号线程用于运行userboot的过程，原来的0号线程退化为Idel，仅在没有其它线程可运行时，才会被调度。
 
 实验步骤：
 
@@ -1390,35 +1499,55 @@ lk run
 [  0.083038 taskctx:295] CurrentCtx::set_current 2 -> 1...
 ```
 
+从第3、7、15这三行看到，调度在三个线程任务之间切换。结合代码，这些调度完全依赖于线程本身主动执行yield。
 
+这种协作式调度存在隐患：如果个别线程因为运行异常或实现缺陷，长久占用CPU而不让出，就会拖垮整个系统。
+
+下一节来看一下如何通过抢占式调度机制，解决这样的问题。
 
 
 
 ### 第六节 实验2.4 - 抢占式调度
 
-抢占是操作系统调度方面的一个基本概念，通常是指，高优先级的任务可以抢占正在运行的低优先级任务的执行权。但是在各种操作系统设计的具体实践上，它们的具体策略、具体设计与实现方式存在差异。这一节，先来澄清ArceOS中，任务抢占采取的具体策略与方式。这个抢占机制有以下几个特点：
+本节目标：引入抢占式调度机制，实验其效果。
+
+抢占是操作系统调度方面的一个基本概念，通常是指，高优先级的任务可以抢占正在运行的低优先级任务的执行权。但是在各种操作系统设计的具体实践上，它们的具体策略、具体设计与实现方式存在差异。这一节，先来澄清本实验中，任务抢占采取的具体策略与方式。我们实验内核的抢占机制有以下几个特点：
 
 1. 抢占是有条件的，并且包括内部条件和外部条件，二者同时具备时，才能触发抢占。内部条件指的是，在任务内部维护的某种状态达到条件，例如本次运行的时间片配额耗尽；外部条件指的是，内核可以在某些阶段，暂时关闭抢占，比如，下步我们的自旋锁就需要在加锁期间关闭抢占，以保证锁范围的原子性。由此可见，这个抢占是兼顾了任务自身状况的，一个正在运行的任务即使是低优先级，在达到内部条件之前，也不会被其它任务抢占。这与典型的硬实时操作系统的抢占就有着明显的区别。
+
+   <img src="./README.assets/image-20240624093513310.png" alt="image-20240624093513310" style="zoom: 33%;" />
 2. 抢占是边沿触发。在内部条件符合的前提下，外部状态从禁止抢占到启用抢占的那个变迁点，会触发一次抢占式重调度resched。
 
 <img src="./README.assets/image-20240624093424830.png" alt="image-20240624093424830" style="zoom: 33%;" />
 
-内部条件涉及任务结构的升级和具体策略，这里我们采取一个最简单的调度策略 - Round-Robin：为每个任务分配相同数量的时间片配额，当前任务耗尽本次配额后可以被抢占，它被追加到运行队列的末尾，以此类推，形成一个环形的调度序列，每个任务都能获得近似相等的计算资源。
+内部条件涉及任务结构的升级和具体策略，比如最简单的调度策略 - Round-Robin：为每个任务分配相同数量的时间片配额，当前任务耗尽本次配额后可以被抢占，它被追加到运行队列的末尾，以此类推，形成一个环形的调度序列，每个任务都能获得近似相等的计算资源。
 
-<img src="./README.assets/image-20240624093513310.png" alt="image-20240624093513310" style="zoom: 33%;" />
 
-实验步骤：(待补充)
 
-```sh
-lk chroot test_preempt
-lk run
+我们本节的实验内容，在上节实验的基础上，把2号线程改为无限循环：
+
+```rust
+    let ctx = run_queue::spawn_task_raw(2, PF_KTHREAD, || {
+        info!("Wander kernel-thread is running ..");
+        info!("Wander kernel-thread enters infinite waiting period ..");
+        loop {
+            static mut NEXT_DEADLINE: usize = 0;
+            let ticks = get_ticks();
+            let deadline = unsafe { NEXT_DEADLINE };
+            if ticks >= deadline {
+                info!("Wander is waiting infinitely .. [{:#x}]", ticks);
+                unsafe {
+                    NEXT_DEADLINE = ticks + PERIODIC_INTERVAL_NANOS as usize;
+                }
+            }
+        }
+    });
+    run_queue::activate_task(ctx.clone());
 ```
 
-预期输出：
+对于协作式调度机制来说，由于2号线程不会主动执行yield也不会退出，这将耗尽整个系统的CPU资源。
 
-在禁止抢占情况下保持当前任务运行，在开抢占的时机点触发抢占。
-
-
+但是在启用抢占式调度策略的情况，内核系统不会受其影响。
 
 实验步骤：
 
@@ -1446,26 +1575,57 @@ lk run
 
 ### 第七节 实验2.5 - 等待与唤醒
 
-关于任务退出与等待其它任务退出的问题，这个问题的复杂性在于：任务有两个角色，一方面任务一定会在某个时刻退出，另一方面某个任务可能在运行中阻塞等待另一个任务的退出。关系如下：
+本节目标：引入等待队列waitq，等待资源的线程任务可以在waitq上等待唤醒；而持有或监控资源的线程任务，可以在资源可用时唤醒waitq上的等待者。
 
-<img src="./README.assets/wait-for-task-1719192205751-5.svg" alt="img" style="zoom:80%;" />
+<img src="./README.assets/image-20240701201548506.png" alt="image-20240701201548506" style="zoom:80%;" />
 
-至于任务之间是如何形成这样一种相互等待关系的？回顾上一节开头的流程图，MainTask对AppTask调用join，建立等待关系，然后把自己状态设置为Blocked，从运行队列run_queue转移到等待队列wait_queue，然后触发重新调度让出执行权。直到AppTask退出时，MainTask作为等待者被重新唤醒，继续执行。
+可以为每一种访问耗时的资源创建一个waitq，如此就可以显著提高系统的整体调度效率。
 
-实验步骤：(待补充)
 
-```sh
-lk chroot rt_wait_queue
-lk run
+
+本节的实验内容，模拟了1号任务暂时无法访问资源而进入waitq，而2号任务唤醒它的过程：
+
+```rust
+    let ctx = run_queue::spawn_task_raw(1, 0, move || {
+        // Prepare for user app to startup.
+        userboot::init(cpu_id, dtb_pa);
+
+        info!("App kernel-thread load ..");
+        // Load userland app into pgd.
+        userboot::load();
+
+        // Note: wait wander-thread to notify.
+        info!("App kernel-thread waits for wanderer to notify ..");
+        APP_READY.store(true, Ordering::Relaxed);
+        WQ.wait();
+
+        // Start userland app.
+        info!("App kernel-thread is starting ..");
+        userboot::start();
+        userboot::cleanup();
+    });
+    run_queue::activate_task(ctx.clone());
+
+    let ctx = run_queue::spawn_task_raw(2, PF_KTHREAD, || {
+        info!("Wander kernel-thread is running ..");
+        info!("Wander kernel-thread waits for app to be ready ..");
+        while !APP_READY.load(Ordering::Relaxed) {
+            run_queue::yield_now();
+        }
+        info!("Wander notifies app ..");
+        WQ.notify_one(true);
+        loop {}
+    });
+    run_queue::activate_task(ctx.clone());
 ```
 
-预期输出：
+第12行：1号线程任务进入waitq等待。
 
-任务进入等待并让出执行权，随后该等待中的任务被唤醒。
+第28行：2号线程任务负责从waitq上唤醒。
 
 
 
-实验步骤：
+看一下实际的实验结果：
 
 ```sh
 lk chroot rt_tour_2_5
@@ -1492,15 +1652,82 @@ lk run
 [  0.085780 rt_tour_2_5:46] App kernel-thread is starting ..
 ```
 
+第1行：1号线程即应用线程等待。
+
+第7行：2号线程Wanderer唤醒1号，由1号完成后续的userboot过程。
+
+目前为止，线程调度的基本机制都已经具备，下一节来处理线程退出的问题。
 
 
 
+### 第八节 实验2.6 - 线程退出
 
-### 第八节 实验2.6 - 应用线程退出
+本节目标：为应用线程、普通内核线程以及Idle线程实现退出机制并进行实验。
 
 
 
-实验步骤：
+对于应用线程，当调用SYSCALL_EXIT时，之前的实现是关闭整个系统，现在改为仅退出自己。
+
+```rust
+fn do_syscall(sysno: usize, arg0: usize) -> usize {
+    match sysno {
+		... ...
+        SYS_EXIT => {
+            info!("Syscall(Exit): ...");
+            let curr = taskctx::current_ctx();
+            curr.set_state(taskctx::TaskState::Dead);
+            run_queue::yield_now();
+            unreachable!();
+        },
+		... ...
+    }
+}
+```
+
+第6~8行：应用线程本身的状态设置为Dead，这样它将不再参与调度过程，然后让出执行权。
+
+
+
+对于普通的内核线程，在创建时进行了标记PF_KTHREAD，在完成自身逻辑的执行后会进入到task_entry：
+
+```rust
+// run_queue/src/lib.rs
+pub extern "C" fn task_entry() -> ! {
+	... ...
+    if (ctx.flags & PF_KTHREAD) != 0 {
+        ctx.set_state(TaskState::Dead);
+        yield_now();
+    }
+    
+    let sp = taskctx::current_ctx().pt_regs_addr();
+    axhal::arch::ret_from_fork(sp);
+	... ...
+}
+```
+
+第4~7行：内核线程永远不会返回用户态，所以直接设置Dead状态后，让出执行权即可。
+
+
+
+Idle线程：对于标准的宏内核，该线程是永不退出的，但是作为一个实验内核，为方便实验，我们让它在其它线程都退出后，执行关机。
+
+```rust
+#[no_mangle]
+pub extern "Rust" fn runtime_main(cpu_id: usize, dtb_pa: usize) {
+    ... ...
+    run_queue::yield_now();
+
+    info!("All threads have exited. System is exiting ..");
+    info!("[rt_tour_2_6]: ok!");
+    axhal::misc::terminate();
+}
+```
+
+第8行：在所有线程退出后，Idle线程负责关机。
+
+
+
+看一下我们的实验情况：
 
 ```sh
 lk chroot rt_tour_2_6
@@ -1522,7 +1749,7 @@ lk run
 [  0.098953 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
-第4~5行：现在syscall - exit改造后，只是让所在线程退出，然后让出执行权。
+第4~5行：现在syscall - exit改造后，只是让应用线程退出，然后让出执行权。
 
 第7行：idle线程在所有其它线程退出后，关闭系统。
 
@@ -1530,7 +1757,7 @@ lk run
 
 ### 本章总结
 
-XXX
+本章的实验在输出结果上与上一章类似，但是我们实验的宏内核已经从单线程变成了多线程，包括应用线程（1号线程），wanderer内核线程（2号线程）和Idle线程（0号线程）。实现多线程是后面支持多应用进程的基础，但在此之前，我们先来把应用的加载方式从原始的PFlash替换为基于文件系统。
 
 
 
@@ -1556,9 +1783,66 @@ XXX
 
 ### 第三节 实验3.1 - 基于内存的块设备驱动
 
+本节目标：进行ramdisk的读写实验，为内核引入第一个块设备。
 
 
-实验步骤：
+
+块设备可以看作是连续存放的块数组，可以基于索引进行按块访问。
+
+<img src="./README.assets/image-20240701212356736.png" alt="image-20240701212356736" style="zoom: 40%;" />
+
+对于很多块设备来说，会实现一个缓存层用于提高读写效率，主要是读效率。但对于本节的ramdisk，不存在这个问题，ramdisk无法持久化，但是相当于直接访问内存的效率，后面我们的内核可以利用它为基准，对其它块设备进行对比测试。
+
+对于块设备，提供了一个统一的标准接口：
+
+```rust
+/// Operations that require a block storage device driver to implement.
+pub trait BlockDriverOps: BaseDriverOps {
+    fn num_blocks(&self) -> u64;
+    fn block_size(&self) -> usize;
+    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult;
+    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult;
+    fn flush(&mut self) -> DevResult;
+}
+```
+
+分别是：总块数、块大小、读一个块、写一个块以及刷新缓存。
+
+无论是本节的ramdisk还是下一节的virtio_blk，只需要实现上述接口，就可以与上层的服务使用者进行对接。
+
+
+
+主要实验内容，测试ramdisk的按快读写能力：
+
+```rust
+#[no_mangle]
+pub extern "Rust" fn runtime_main(_cpu_id: usize, _dtb_pa: usize) {
+    let mut disk = ramdisk::RamDisk::new(0x1000);
+	... ...
+
+    let block_id = 1;
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    assert!(disk.read_block(block_id, &mut buf).is_ok());
+    assert!(buf[0..4] != *b"0123");
+
+    buf[0] = b'0'; buf[1] = b'1'; buf[2] = b'2'; buf[3] = b'3';
+
+    info!("ramdisk: write data ..");
+    assert!(disk.write_block(block_id, &buf).is_ok());
+    assert!(disk.flush().is_ok());
+    info!("ramdisk: write ok!");
+
+    info!("ramdisk: read data ..");
+    assert!(disk.read_block(block_id, &mut buf).is_ok());
+    assert!(buf[0..4] == *b"0123");
+    info!("ramdisk: verify ok!");
+	... ...
+}
+```
+
+构造一个页空间的ramdisk，测试对第一个block的读写。
+
+下面来具体操作一下：
 
 ```sh
 lk chroot rt_tour_3_1
@@ -1577,13 +1861,66 @@ lk run
 [  0.057397 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
+测试成功，但是并不能直接用它来加载外部应用。下节来实现一个具有持久能力的块设备。
+
 
 
 ### 第四节 实验3.2 - VirtioBlk块设备驱动
 
+本节目标：引入virtio_blk块设备，实验对它的按块读写能力。
+
+对于qemu来说，virtio是最常用的访问外部设备的方式，尤其对于块设备，这种效率优势尤其明显。
+
+virtio设备的基本原理如下：
+
+<img src="./README.assets/image-20240701225015541.png" alt="image-20240701225015541" style="zoom:40%;" />
+
+1. Host层
+
+   通过qemu命令行指定需要支持的设备类型，对于virtio-blk设备，还需要为它指定一个后备文件，作为该块设备的持久数据存储。
+
+2. Guest层
+
+   qemu向Guest暴露了一系列virtio-mmio的地址区域，相当于现实中的主板插槽槽位。Guest中的操作系统内核可以基于virtio-mmio驱动去探查这些“槽位”区域，通过类型返回值判断是否背后有对应的设备以及具体是什么类型。
 
 
-实验步骤：
+
+我们的实验在`lk prepare`这一步，构建了一个disk.img磁盘文件作为块设备的存储，其中/sbin目录中包含了origin.bin这个应用。
+
+当`lk run`启动qemu时，指定如下参数使得该virtio-blk块设备生效：
+
+```sh
+  -device virtio-blk-device,drive=disk0 -drive id=disk0,if=none,format=raw,file=disk.img
+```
+
+之后在内核启动时就可以发现该块设备。实验内容：
+
+```rust
+#[no_mangle]
+pub extern "Rust" fn runtime_main(cpu_id: usize, dtb_pa: usize) {
+	... ...
+    let mut alldevs = axdriver::init_drivers2();
+    let mut disk = alldevs.block.take_one().unwrap();
+	... ...
+    let block_id = 1;
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    assert!(disk.read_block(block_id, &mut buf).is_ok());
+
+    buf[0] = b'0'; buf[1] = b'1'; buf[2] = b'2'; buf[3] = b'3';
+
+    assert!(disk.write_block(block_id, &buf).is_ok());
+    assert!(disk.flush().is_ok());
+
+    assert!(disk.read_block(block_id, &mut buf).is_ok());
+    assert!(buf[0..4] == *b"0123");
+    info!("virtblk: verify ok!");
+	... ...
+}
+```
+
+实验过程与上一节基本一致。
+
+具体的实验步骤：
 
 ```sh
 lk chroot rt_tour_3_2
@@ -1606,27 +1943,51 @@ lk run
 [  0.233778 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
+从第7行看到，驱动在probe过程中，通过mmio发现了virtio-blk设备。之后就是执行我们的实验代码，读写操作成功。
 
+本节实验的disk.img实际上包含了fat32文件系统，并且上面存放了origin.bin应用，但是无法直接从块设备层读出。
+
+下一节来解决这个问题。
 
 
 
 ### 第五节 实验3.3 - 文件系统展开
 
-立体展开文件系统，形成由目录和文件构成的树。
+本节目标：展开Fat32文件系统，实验从文件系统中读出文件。
 
-对于有后备的文件系统，解析并展开存储在块设备中的扁平的序列化的文件系统数据；
+Mount是操作系统中对文件系统的基本操作，它相当于把“平坦”存储在介质上的数据结构立体展开，形成由目录和文件构成的树。
 
-对于伪文件系统，直接建立立体化的目录文件树。
+<img src="./README.assets/image-20240701231655356.png" alt="image-20240701231655356" style="zoom:80%;" />
 
-<img src="./README.assets/image-20240624112624658.png" alt="image-20240624112624658" style="zoom:80%;" />
+第一棵文件系统树会挂在根目录“/”作为根文件系统，其后可以在它的任意目录结点上继续mount新的文件系统，拼接形成一棵完整的树，如同“植物嫁接”。当跨越这些mount点时，就会进入相应的文件系统树。
 
+<img src="./README.assets/image-20240701232037731.png" alt="image-20240701232037731" style="zoom:80%;" />
 
+本节的实验内容，基于上节实验的virtio-blk块设备，挂载fat32文件系统并作为根文件系统，从中读出origin.bin应用。
 
-挂载fat32文件系统并作为根文件系统，通过查找、读、写确认可操作性。
+```rust
+#[no_mangle]
+pub extern "Rust" fn runtime_main(cpu_id: usize, dtb_pa: usize) {
+    axlog2::init("info");
+    info!("[rt_tour_3_3]: ...");
 
+    fstree::init(cpu_id, dtb_pa);
 
+    let fs = fstree::init_fs();
+    let locked_fs = fs.lock();
 
-实验步骤：
+    let fname = "/sbin/origin.bin";
+    let buf = axfile::api::read(fname, &locked_fs).unwrap();
+    info!("read test file: {:?}; size [{}]", buf, buf.len());
+
+    info!("[rt_tour_3_3]: ok!");
+    axhal::misc::terminate();
+}
+```
+
+第13行：读出应用程序文件内容后，进行显示，以确认有效性。
+
+具体的实验步骤：
 
 ```sh
 lk chroot rt_tour_3_3
@@ -1644,17 +2005,54 @@ lk run
 [  4.402072 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
-
+第3行：可以看到正常打印了应用程序的代码和长度，证明获取应用程序成功。下节来正式替换读取外部文件的方式。
 
 
 
 ### 第六节 实验3.4 - 从文件系统加载应用
 
-替换pflash方式。
+本节目标：取消PFlash加载应用的方式，改为从文件系统中加载。
+
+本章的前面几个实验都是独立实验，没有像过去那样基于上一章的实验进行扩展。
+
+这一节回归到原来模式，我们将在上一章最后的实验2.6的基础上，替换应用的加载方式。
 
 
 
-实验步骤：
+实验内容：
+
+```rust
+// rt_tour_3_4/src/userboot.rs
+pub fn load() {
+    let fs = fstree::init_fs();
+    let locked_fs = fs.lock();
+
+    let fname = "/sbin/origin.bin";
+    let load_code = axfile::api::read(fname, &locked_fs).unwrap();
+    let size = load_code.len();
+    info!("read origin.bin: size [{}]", size);
+
+    let ctx = taskctx::current_ctx();
+    let pgd = ctx.try_pgd().expect("Current task has no pgd!");
+
+    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE | MappingFlags::USER;
+    pgd.lock().map_region_and_fill(USER_APP_ENTRY.into(), PAGE_SIZE_4K, flags).unwrap();
+    info!("Map user page: {:#x} ok!", USER_APP_ENTRY);
+
+    let run_code = unsafe { core::slice::from_raw_parts_mut(USER_APP_ENTRY as *mut u8, size) };
+    run_code.copy_from_slice(&load_code);
+
+    info!("App code: {:?}", &run_code[0..size]);
+}
+```
+
+第6~9行：从文件系统中加载/sbin/origin.bin应用二进制文件。
+
+第14~15行：建立映射为用户应用准备好地址空间。
+
+第18~18行：完成应用程序origin.bin的加载。至此，PFlash的方式被完全替换。
+
+具体的实验步骤：
 
 ```sh
 lk chroot rt_tour_3_4
@@ -1677,19 +2075,21 @@ lk run
 [  4.525885 rt_tour_3_4::trap::syscall:30] [rt_tour_3_4]: ok!
 ```
 
-
+第4行完成了应用的加载，而第7行之后，证实了应用如之前一样顺利完成了启动和运行。新的加载方式成功！
 
 
 
 ### 本章总结
 
-XXX
+本章完成了第三次的宏内核迭代，相对于上一次，系统的对外功能并无显著变化，主要改进是内部支持了块设备和文件系统，并把加载外部应用的方式改成了基于文件系统，提升了对应用和文件的管理能力。
+
+下一章我们来引入多地址空间管理，为宏内核提供最核心的抽象 - 进程。
 
 
 
 ## 第四章 - 地址空间和进程
 
-本章目标：在上一章基础上，内核支持多地址空间，支持进程级任务。原有的0号和1号线程职责不变，但对应升级为进程，其中1号进程拥有独立的地址空间。支持mmap和fork两个进程级别的高级操作。
+本章目标：在上一章基础上，内核支持多地址空间，开始支持进程的概念。原有的0号和1号线程职责不变，但在增加对资源的管理能力之后，对应升级为进程，其中1号进程拥有独立的地址空间。支持mmap和fork两个进程级别的高级操作。
 
 ### 第一节 本章系统构成
 
@@ -1711,9 +2111,67 @@ XXX
 
 ### 第三节 实验4.1 - 多页表
 
-XXX
+本节目标：为1号线程任务和2号线程任务分配不同的页表，对相同的虚拟地址区域进行操作，确认没有冲突。
 
-实验步骤：
+多页表的支持包括两个方面：
+
+1. 页表的复制
+
+   <img src="./README.assets/image-20240701235503269.png" alt="image-20240701235503269" style="zoom:40%;" />
+
+   本实验中页表的布局与Linux相同，把整个空间分为高低两个部分，高端留给内核空间，所有页表共享这部分的映射，也就是说，从任何一个页表都能访问到相同的内核地址空间；而低端分给用户应用，各个用户空间是共享还是独立，由复制任务的策略决定。
+
+2. 任务切换时，会进行必要的页表切换
+
+   注意是必要的页表切换，由于上述第1点的特殊性，很多时候不需要切换。
+
+   <img src="./README.assets/image-20240702000906736.png" alt="image-20240702000906736" style="zoom:80%;" />
+
+   简单来说，只有从内核线程向用户线程切换，且用户线程的地址空间与之前内核线程借用的地址空间不一致时，才会触发页表的切换。
+
+
+
+本节的实验内容，与上一章最后的实验3.4基本一致，只是为2号内核线程wanderer也分配了独立的页表：
+
+```rust
+    let ctx = run_queue::spawn_task_raw(2, PF_KTHREAD, move || {
+        while !(*APP_READY.lock()) {
+            run_queue::yield_now();
+        }
+
+        info!("Wander kernel-thread is running ..");
+
+        // Alloc new pgd and setup.
+        let pgd = Arc::new(SpinNoIrq::new(pgd_alloc()));
+        unsafe {
+            write_page_table_root0(pgd.lock().root_paddr().into());
+        }
+
+        let mut ctx = taskctx::current_ctx();
+        assert!(ctx.pgd.is_none());
+        ctx.as_ctx_mut().set_mm(2, pgd.clone());
+
+        let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE | MappingFlags::USER;
+        pgd.lock().map_region_and_fill(USER_APP_ENTRY.into(), PAGE_SIZE_4K, flags).unwrap();
+        info!("Wanderer: Map user page: {:#x} ok!", USER_APP_ENTRY);
+
+        // Try to destroy user app code area
+        let size = 16;
+        let run_code = unsafe { core::slice::from_raw_parts_mut(USER_APP_ENTRY as *mut u8, size) };
+        run_code.fill(b'A');
+        info!("Try to destroy app code: [{:#x}]: {:?}", USER_APP_ENTRY, &run_code[0..size]);
+
+        info!("Wander notifies app ..");
+        WQ.notify_one(true);
+    });
+    run_queue::activate_task(ctx.clone());
+```
+
+第9~12行：分配独立页表。
+
+第23~25行：2号线程对映射到USER_APP_ENTRY，即0x1000的区域进行覆写，看是否会对1号线程造成影响。
+
+具体的实验步骤：
 
 ```sh
 lk chroot rt_tour_4_1
@@ -1740,24 +2198,23 @@ lk run
 
 第7行：应用代码没有受到破坏，因为两个线程的页表是相互独立的。
 
+本节建立了多页表机制，目前内核的多页表和多线程支持都已经具备，下节来支持进程的概念。
 
 
-### 第四节 实验4.2 - 创建进程级任务
 
+### 第四节 实验4.2 - 创建进程或线程
 
+本节目标：通过复制的方式，产生新的进程或线程。具体产生哪一种，取决于地址空间是复制还是共享。
 
 <img src="./README.assets/image-20240624095858937.png" alt="image-20240624095858937" style="zoom: 50%;" />
 
-Fork系统以克隆的方式产生新的用户进程，它的上级使用者包括userboot和syscall。
+对于标准的宏内核来说，fork/clone/vfork这一类操作是创建新进程/线程的基本方式（以下统称fork）。
 
-作为leader的fork组件具体完成两步操作：
-
-1. 复制当前task，产生新的task。
-2. 把新产生的task投递到runq队列，等待调度。这一步通常称为wakeup。
+fork产生新进程的流程大致如下图：
 
 <img src="./README.assets/image-20240624095927752.png" alt="image-20240624095927752" style="zoom: 67%;" />
 
-对于syscall发起的请求，fork从发起系统调用的用户进程开始，走一个完整的闭环流程；而对于userboot，只执行后半程。
+对于syscall发起的请求，fork从发起系统调用的用户进程开始，走一个完整的闭环流程；而对于当前实验，我们还处于userboot的过程 - 即启动首个用户态应用的过程中，只执行后半程。
 
 无论从哪里发起，fork都会执行copy process、wakeup process和ret_from_fork这三步，产生一个新的用户态进程。
 
@@ -1767,7 +2224,41 @@ Fork系统以克隆的方式产生新的用户进程，它的上级使用者包�
 
 
 
-实验步骤：
+实验内容，通过fork::kernel_thread来创建新的内核线程，但在执行过程中，为它设置了单独的页表，也相当于创建了进程：
+
+```rust
+    let tid = fork::kernel_thread(move || {
+        info!("Wander kernel-thread is running ..");
+
+        // Alloc new pgd and setup.
+        let pgd = Arc::new(SpinNoIrq::new(pgd_alloc()));
+        unsafe {
+            write_page_table_root0(pgd.lock().root_paddr().into());
+        }
+
+        let mut ctx = taskctx::current_ctx();
+        assert!(ctx.pgd.is_none());
+        ctx.as_ctx_mut().set_mm(2, pgd.clone());
+
+        let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE | MappingFlags::USER;
+        pgd.lock().map_region_and_fill(USER_APP_ENTRY.into(), PAGE_SIZE_4K, flags).unwrap();
+        info!("Wanderer: Map user page: {:#x} ok!", USER_APP_ENTRY);
+
+        // Try to access user app code area
+        let size = 16;
+        let run_code = unsafe { core::slice::from_raw_parts_mut(USER_APP_ENTRY as *mut u8, size) };
+        info!("Try to access app code: {:?}", &run_code[0..size]);
+
+        info!("Wander kernel-thread waits for app to be ready ..");
+        while !(*APP_READY.lock()) {
+            run_queue::yield_now();
+        }
+        info!("Wander notifies app ..");
+        WQ.notify_one(true);
+    }, CloneFlags::CLONE_FS);
+```
+
+具体的实验步骤：
 
 ```sh
 lk chroot rt_tour_4_2
@@ -1787,9 +2278,15 @@ lk run
 [  4.173942 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
+输出并无变化，但是内部实现已经是基于fork的高级操作。下一节来扩展另一个高级操作mmap。
+
 
 
 ### 第五节 实验4.3 - 地址空间映射mmap
+
+本节目标：
+
+<img src="./README.assets/image-20240702000248201.png" alt="image-20240702000248201" style="zoom:80%;" />
 
 实验步骤：
 
@@ -1953,6 +2450,8 @@ lk run
 
 XXX
 
+<img src="./README.assets/image-20240702000721116.png" alt="image-20240702000721116" style="zoom:80%;" />
+
 
 
 <img src="./README.assets/image-20240701142424963.png" alt="image-20240701142424963" style="zoom:80%;" />
@@ -1989,6 +2488,8 @@ lk run
 ### 第六节 实验5.4 - 支持GLibc和应用的系统调用
 
 XXX
+
+<img src="./README.assets/image-20240701173502749.png" alt="image-20240701173502749" style="zoom: 50%;" />
 
 实验步骤：
 
