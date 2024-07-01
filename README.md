@@ -799,15 +799,52 @@ lk run
 
 ### 第六节 实验1.4 - 从PFlash加载应用
 
-应用的代码和原理，构造二进制程序。
+本节目标：准备用户态地址空间区域，把外部应用加载进来。
 
-qemu的pflash原理。
+一般来说，应用程序会作为文件系统中的一个文件，被存放在磁盘之类的存储介质上，但是目前我们内核还不支持块设备驱动和文件系统，所以本实验采用了更基本的方式，从pflash来直接加载应用程序。
 
-从pflash加载应用到用户空间的x01000（预先在实验1.3进行了分配）。实验前后可读。开启SUM。
+PFlash作为只读设备时，并不需要驱动，它的存储空间直接以MMIO的方式映射到内存地址空间中，可以直接读出数据。
+
+Qemu模拟了两个PFlash设备，其中0号会当作扩展bios，不能用；我们用1号设备，启用它的命令行是：
+
+```sh
+# scripts/make/qemu.mk
+-drive if=pflash,file=$(CURDIR)/$(PFLASH_IMG),format=raw,unit=1
+```
+
+下面我们需要在当前目录下创建PFLASH_IMG文件，把应用放进去。这个介质的格式：
+
+<img src="./README.assets/image-20240701145541243.png" alt="image-20240701145541243" style="zoom:80%;" />
+
+包括头信息和数据两个部分，magic固定为"pfld"对应的字节，version目前定为1，size指示PayloadData即应用程序的长度，pad预留。
+
+应用程序的工程在payload/origin，是基于汇编编写的配合实验的小程序，编译过程中会把ELF转为Bin格式，因为到第五章之前，我们都还不支持ELF解析器。应用程序的具体实现，到本章的第八节再详细说明。
 
 
 
-本实验的主要内容：
+1号PFlash设备MMIO的物理地址是0x2200_0000，占用128M空间。当启动qemu后，就可以访问到该区间。
+
+```rust
+// pflash/pflash/src/lib.rs
+const PFLASH_START: usize = 0x2200_0000;
+pub fn load_next(offset: Option<usize>) -> Option<(usize, usize)> {
+    let offset = offset.unwrap_or(0);
+    let va = phys_to_virt(PFLASH_START + offset);
+    assert!(is_aligned(va, 16));
+    let data = va as *const u32;
+    let data = unsafe {
+        slice::from_raw_parts(data, mem::size_of::<PayloadHead>())
+    };
+    assert_eq!(data[0], MAGIC);
+    assert_eq!(data[1].to_be(), VERSION);
+
+    Some((va + mem::size_of::<PayloadHead>(), data[2].to_be() as usize))
+}
+```
+
+头信息在PFlash的开头（无偏移），所以直接load_next(None)可以取得应用二进制程序origin.bin的开始地址和长度。
+
+然后就可以在页表中映射一个一页的用户地址空间，把应用二进制程序从PFlash中拷贝进去。
 
 ```rust
 const USER_APP_ENTRY: usize = 0x1000;
@@ -830,11 +867,7 @@ pub fn load(pgd: &mut PageTable) {
 }
 ```
 
-
-
-
-
-实验步骤：
+上一节分页管理的实验中，实际上我们已经验证过对PFlash MMIO区间的访问，并且验证了用户地址空间的映射功能。本节只是把这些功能组合起来，具体操作的实验步骤：
 
 ```sh
 lk chroot tour_1_4
@@ -854,19 +887,37 @@ lk run
 [  0.065143 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
+第5行，输出的是用户地址空间0x1000位置的数据，对照我们编译的origin.bin，内容一致，证明应用加载成功。
+
+下一节，我们将实验切换到用户态来执行这个应用origin.bin。
+
 
 
 ### 第七节 实验1.5 - 返回用户态执行应用
 
-制造context，返回用户态。
+本节目标：伪造异常上下文构建一个返回现场，返回用户态去执行应用代码。
 
-启动前简单设置实验入口。
+多数体系结构都没有提供直接从内核态进入用户态的专门指令，但是我们可以通过特权级返回指令和伪造现场的方法达到这种效果。
 
-<img src="./README.assets/image-20240624105512989.png" alt="image-20240624105512989" style="zoom: 50%;" />
+下图是基本原理：
 
-实验代码：
+<img src="./README.assets/image-20240701153033273.png" alt="image-20240701153033273" style="zoom:80%;" />
+
+应用从用户态进入内核态的正常过程：
+
+1. 硬件负责过程：自动把异常触发时的pc寄存器值存入epc寄存器，即当前指令位置；把运行状态自动保存到sstatus寄存器，这些状态包括了中断状态和当时的特权级（来自用户态/内核态）。
+2. 内核负责过程：epc寄存器、ssatus寄存器以及用户态各个寄存器状态会作为一个栈帧被保存到内核栈
+
+相应的，当从内核态返回到用户态时，各个寄存器的值会从内核栈帧恢复出来。重点是sret指令执行时，epc会恢复给pc寄存器，特权级会根据sstatus的值来决定。
+
+我们就借助这个返回过程的原理，在内核栈上伪造一个栈帧，把epc对应项设置为应用的入口，sp对应项指向预分配的栈，最重要的是，在sstatus对应项中，标记上一次是从用户态切换进来的。最终，当我们执行sret指令时，内核将按我们预期的那样，返回到用户态，并从应用入口处开始执行。
+
+
+
+关键实验代码：
 
 ```rust
+// rt_tour_1_5/src/userboot.rs
 pub fn start() {
     // Prepare kernel stack
     let ksp = global_allocator().alloc_pages(1, PAGE_SIZE_4K).unwrap();
@@ -876,11 +927,24 @@ pub fn start() {
     start_thread(pt_regs, USER_APP_ENTRY, 0);
     axhal::arch::ret_from_fork(pt_regs);
 }
+
+// axhal/src/arch/riscv/context.rs
+pub fn start_thread(regs: usize, pc: usize, sp: usize) {
+    let regs = unsafe { core::slice::from_raw_parts_mut(regs as *mut TrapFrame, 1) };
+    regs[0].sepc = pc;
+    // default to open the sum bit
+    regs[0].sstatus = SR_SPIE | SR_FS_INITIAL | SR_UXL_64 | SR_SUM;
+    regs[0].regs.sp = sp;
+}
 ```
 
+第8行：当前的实验应用origin.bin很简单，没有用到栈，所以sp传入的是0。正常来说，应该分配一组连续用户页面，并把分配区间的最高地址作为sp传入。
+
+第17行：对regs[0].sstatus没有设置SR_PP位，那么sret指令会把返回的特权级置为U，即用户态。
 
 
-实验步骤：
+
+下面来实际操作一下实验：
 
 ```sh
 lk chroot rt_tour_1_5
@@ -900,19 +964,27 @@ lk run
 [  0.061388 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
+注意第5行：这一句是异常中断向量表入口处打印的信息。
+
+下一节可以看到，这个简单应用会发出一系列的异常和系统调用。由于我们内核目前尚未支持，所以直接输出了上述信息，说明应用已经启动。可以参照qemu.log，查看sret后指令流的执行，确认这一点。
+
 
 
 ### 第八节 实验1.6 - 响应异常系统调用和中断
 
-初始化异常响应框架。依次响应ebreak异常和write系统调用。
+终于来到这一节，本节实验中，我们将初始化异常响应框架。依次响应ebreak异常和一组系统调用，并支持中断的处理。
 
-开中断，通过read系统调用获取中断次数。
+本节作为第一次迭代的收尾，我们的内核将初步具备宏内核的基本特征。
 
+从本章的第三节开始，我们就引入了一个配合实验的应用origin，把它编译为bin格式，存放在PFlash中。
 
-
-用户态应用的实现：
+现在来看一下这个应用的实现：
 
 ```rust
+const SYS_READ: usize = 63;
+const SYS_WRITE:usize = 64;
+const SYS_EXIT: usize = 93;
+
 // payload/origin/src/main.rs
 #[no_mangle]
 unsafe extern "C" fn _start() -> ! {
@@ -932,27 +1004,21 @@ unsafe extern "C" fn _start() -> ! {
 }
 ```
 
+第9行：触发ebreak异常。
+
+第11~14行：发出SYS_READ系统调用，如果返回值小于等于1，则重复执行。
+
+第15~16行：发出SYS_WRITE系统调用。
+
+第17~18行：发出SYS_EXIT系统调用。
+
+注意：这三个系统调用并不是标准的Linux系统调用，仅用于配合我们的内核实验。并且，我们目前也没有给出它们的具体功能语义，具体完成什么功能是由我们的实验内核决定的。这为后面的实验提供了方便。
 
 
 
+内核的异常处理框架实际上是处理了三类情况，包括异常、中断和系统调用。
 
-实验代码：
-
-```rust
-pub fn init() {
-    excp::init();
-    syscall::init();
-    irq::init();
-
-    unsafe {
-        stvec::write(trap_vector_base as usize, stvec::TrapMode::Direct)
-    }
-}
-```
-
-
-
-excp的实现：
+先来看对异常ebreak响应的实现：
 
 ```rust
 pub fn handle_breakpoint(sepc: &mut usize) {
@@ -961,9 +1027,9 @@ pub fn handle_breakpoint(sepc: &mut usize) {
 }
 ```
 
+只是打印了信息，注意`ebreak`是2字节指令，让epc前进2字节，否则会反复在异常触发点上无限触发执行。
 
-
-irq的实现：
+然后看一下irq的响应实现，目前只是处理时钟中断：
 
 ```rust
 /// Call the external IRQ handler.
@@ -979,28 +1045,13 @@ pub fn handle(irq_num: usize, _tf: &mut TrapFrame) {
 pub fn get_ticks() -> usize {
     TICKS.load(Ordering::Relaxed)
 }
-
-fn update_timer() {
-    // Setup timer interrupt handler
-    const PERIODIC_INTERVAL_NANOS: u64 =
-        axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64 / 10;
-
-    static mut NEXT_DEADLINE: u64 = 0;
-
-    let now_ns = axhal::time::current_time_nanos();
-    // Safety: we have disabled preemption in IRQ handler.
-    let mut deadline = unsafe { NEXT_DEADLINE };
-    if now_ns >= deadline {
-        deadline = now_ns + PERIODIC_INTERVAL_NANOS;
-    }
-    unsafe { NEXT_DEADLINE = deadline + PERIODIC_INTERVAL_NANOS };
-    axhal::time::set_oneshot_timer(deadline);
-}
 ```
 
+第6行：略去了update_timer的实现，可以参考源码trap/irq.rs。这个函数作用是重重定时器下次触发的时间。
 
+第7行：设置了一个atomic变量TICKS，是个时钟滴答的计数。可以通过get_ticks取得当前值。
 
-syscall的实现：
+最后是重点，对syscall的响应实现：
 
 ```rust
 pub fn handle(tf: &mut TrapFrame) {
@@ -1035,7 +1086,11 @@ fn do_syscall(sysno: usize, arg0: usize) -> usize {
 }
 ```
 
+第11~15行：为READ赋予意义，返回当前的ticks计数。
 
+第16~20行：响应WRITE，参数是当前的ticks。但是实际没有真正写入数据，只是对比了本次系统调用与上次READ直接的时间间隔。
+
+第21~25行：EXIT，当前的行为是直接关闭系统，后面的实验我们会改变其语义。
 
 
 
@@ -1066,11 +1121,17 @@ lk run
 [  0.070113 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
+从输出可以证明，应用如期启动并完成了运行。
+
 
 
 ### 本章总结
 
-XXX
+本章是第一次迭代，我们通过六个实验建立了一个原始的宏内核。
+
+这个宏内核只是在单线程和单地址空间下运行，但已经具备了宏内核的一些重要的特征和功能，为后面的实验奠定了基础。
+
+后面的各轮迭代会参照该形式，不断的增强或替换功能组件，最终形成一个典型的具备完整特性的宏内核。
 
 
 
@@ -1193,7 +1254,7 @@ lk run
 [  0.072740 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
-单从信息输出来看，本实验的输出与上一章的最后一个实验1.6完全相同。但是从实现的角度，本实验增加了对同步和任务的支持，这为下一节支持多线程并发奠定了基础。
+单从信息输出来看，本实验的输出与上一章的最后一个实验1.6完全相同。但是从实现的角度，本实验增加了对同步和任务的支持，这为下一节支持多线程并发准备了条件。
 
 
 
@@ -1435,18 +1496,7 @@ lk run
 
 
 
-### 第八节 实验2.6 - 应用的睡眠与退出
-
-实验预期输出：
-
-```sh
-[  0.032055 rt_mutex:20] [rt_mutex]: ...
-[  0.034355 axalloc:213] initialize global allocator at: [0xffffffc080273000, 0xffffffc088000000)
-[  0.038137 task:287] Initialize schedule system ...
-[  0.039305 task:236] CurrentTask::init_current...
-[  0.040092 rt_mutex:37] 0
-[  0.040629 rt_mutex:40] [rt_mutex]: ok!
-```
+### 第八节 实验2.6 - 应用线程退出
 
 
 
@@ -1459,6 +1509,22 @@ lk run
 ```
 
 屏幕输出：
+
+```sh
+[  0.091862 rt_tour_2_6::trap::excp:2] Exception(Breakpoint) @ 0x1000
+[  0.092816 rt_tour_2_6::trap::syscall:20] Syscall(Read): ticks [3]
+[  0.093557 rt_tour_2_6::trap::syscall:25] Syscall(Write): ticks [3:3]
+[  0.094360 rt_tour_2_6::trap::syscall:29] Syscall(Exit): ...
+[  0.094996 run_queue::run_queue:187] ============ context switch: 1 -> 0
+[  0.095990 taskctx:295] CurrentCtx::set_current 1 -> 0...
+[  0.097714 rt_tour_2_6:65] All threads have exited. System is exiting ..
+[  0.098404 rt_tour_2_6:66] [rt_tour_2_6]: ok!
+[  0.098953 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+第4~5行：现在syscall - exit改造后，只是让所在线程退出，然后让出执行权。
+
+第7行：idle线程在所有其它线程退出后，关闭系统。
 
 
 
@@ -1490,17 +1556,6 @@ XXX
 
 ### 第三节 实验3.1 - 基于内存的块设备驱动
 
-实验步骤：
-
-```sh
-lk chroot rt_ramdisk
-lk run
-```
-
-预期输出：
-
-成功读写内存块。
-
 
 
 实验步骤：
@@ -1513,20 +1568,18 @@ lk run
 
 屏幕输出：
 
+```sh
+[  0.054789 rt_tour_3_1:40] ramdisk: write data ..
+[  0.055330 rt_tour_3_1:43] ramdisk: write ok!
+[  0.055818 rt_tour_3_1:45] ramdisk: read data ..
+[  0.056423 rt_tour_3_1:48] ramdisk: verify ok!
+[  0.056873 rt_tour_3_1:50] [rt_tour_3_1]: ok!
+[  0.057397 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
 
 
 ### 第四节 实验3.2 - VirtioBlk块设备驱动
-
-实验步骤：
-
-```sh
-lk chroot rt_driver_virtio
-lk run
-```
-
-预期输出：
-
-成功读写块。
 
 
 
@@ -1540,6 +1593,21 @@ lk run
 
 屏幕输出：
 
+```sh
+[  0.053701 page_table:164] Disable PFlash region: [PA:0x22000000 - PA:0x24000000]
+[  0.054690 axdriver:152] Initialize device drivers...
+[  0.055286 axdriver:153]   device model: static
+[  0.056076 virtio_drivers::device::blk:55] device features: SEG_MAX | GEOMETRY | ... 
+[  0.058582 virtio_drivers::device::blk:64] config: 0xffffffc010008100
+[  0.059383 virtio_drivers::device::blk:69] found a block device of size 131072KB
+[  0.061083 axdriver::bus::mmio:11] registered a new Block device at: "virtio-blk"
+[  0.232790 rt_tour_3_2:44] virtblk: verify ok!
+[  0.233252 rt_tour_3_2:46] [rt_tour_3_2]: ok!
+[  0.233778 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+
+
 
 
 ### 第五节 实验3.3 - 文件系统展开
@@ -1552,15 +1620,7 @@ lk run
 
 <img src="./README.assets/image-20240624112624658.png" alt="image-20240624112624658" style="zoom:80%;" />
 
-实验步骤：
 
-```sh
-lk chroot rt_axmount
-lk prepare
-lk run
-```
-
-预期输出：
 
 挂载fat32文件系统并作为根文件系统，通过查找、读、写确认可操作性。
 
@@ -1575,6 +1635,16 @@ lk run
 ```
 
 屏幕输出：
+
+```sh
+[  0.063810 axmount:28] Initialize filesystems...
+[  0.064365 axmount:31]   use block device 0: "virtio-blk"
+[  4.399913 rt_tour_3_3:21] read test file: [2, 144, 147, 8, 240, 3, 115, 0, ... ...]; size [34]
+[  4.401557 rt_tour_3_3:23] [rt_tour_3_3]: ok!
+[  4.402072 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+
 
 
 
@@ -1593,6 +1663,21 @@ lk run
 ```
 
 屏幕输出：
+
+```sh
+[  4.506520 rt_tour_3_4:36] App kernel-thread load ..
+[  4.513593 rt_tour_3_4::userboot:24] read origin.bin: size [34]
+[  4.515006 rt_tour_3_4::userboot:31] Map user page: 0x1000 ok!
+[  4.515680 rt_tour_3_4::userboot:36] App code: [2, 144, 147, 8, 240, 3, 115, 0, ... ...]
+[  4.518273 rt_tour_3_4:41] App kernel-thread waits for wanderer to notify ..
+[  4.521272 rt_tour_3_4:46] App kernel-thread is starting ..
+[  4.523769 rt_tour_3_4::trap::syscall:20] Syscall(Read): ticks [447]
+[  4.524480 rt_tour_3_4::trap::syscall:25] Syscall(Write): ticks [447:447]
+[  4.525240 rt_tour_3_4::trap::syscall:29] Syscall(Exit): system is exiting ...
+[  4.525885 rt_tour_3_4::trap::syscall:30] [rt_tour_3_4]: ok!
+```
+
+
 
 
 
@@ -1638,6 +1723,23 @@ lk run
 
 屏幕输出：
 
+```sh
+[  0.079187 rt_tour_4_1:71] Wanderer: Map user page: 0x1000 ok!
+[  0.079872 rt_tour_4_1:77] Try to destroy app code: [0x1000]: [65, 65, 65, 65, 65, ... ...]
+[  0.081128 rt_tour_4_1:79] Wander notifies app ..
+[  0.130929 rt_tour_4_1:41] App kernel-thread load ..
+[  0.138295 rt_tour_4_1::userboot:24] read origin.bin: size [34]
+[  0.139109 rt_tour_4_1::userboot:31] Map user page: 0x1000 ok!
+[  0.139781 rt_tour_4_1::userboot:36] App code: [0x1000]: [2, 144, 147, 8, 240, 3, 115, 0, ... ...]
+[  0.141876 rt_tour_4_1:46] App kernel-thread waits for wanderer to notify ..
+[  0.142649 run_queue::run_queue:123] task block: 1
+[  0.143446 rt_tour_4_1:86] [rt_tour_4_1]: ok!
+```
+
+第2行：线程wanderer对用户应用加载区域的相同地址0x1000进行覆写。
+
+第7行：应用代码没有受到破坏，因为两个线程的页表是相互独立的。
+
 
 
 ### 第四节 实验4.2 - 创建进程级任务
@@ -1675,6 +1777,16 @@ lk run
 
 屏幕输出：
 
+```sh
+[  4.169331 rt_tour_4_2::userboot:42] Alloc page: 0xffffffc0803a2000
+[  4.170268 rt_tour_4_2::trap::excp:2] Exception(Breakpoint) @ 0x1000
+[  4.171183 rt_tour_4_2::trap::syscall:20] Syscall(Read): ticks [4]
+[  4.171878 rt_tour_4_2::trap::syscall:25] Syscall(Write): ticks [4:4]
+[  4.172617 rt_tour_4_2::trap::syscall:29] Syscall(Exit): system is exiting ...
+[  4.173303 rt_tour_4_2::trap::syscall:30] [rt_tour_4_2]: ok!
+[  4.173942 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
 
 
 ### 第五节 实验4.3 - 地址空间映射mmap
@@ -1689,41 +1801,35 @@ lk run
 
 屏幕输出：
 
-
-
-实验步骤：(待补充)
-
 ```sh
-lk chroot test_mm_map
-lk run
+[  4.758022 task:145] alloc_mm...
+[  4.758749 page_table::paging:77] CLONE: from 0xFFFFFFC0802B9000 => 0xFFFFFFC0803A1000
+[  4.760718 rt_tour_4_3:39] App kernel-thread load ..
+[  4.767878 rt_tour_4_3::userboot:20] read origin.bin: size [34]
+[  4.768675 mmap:138] mmap va 0x1000 offset 0x0 flags 0x10 prot 0x7
+[  4.769845 mmap:187] mmap region: 0x1000 - 0x2000, vm_flags: 0x7, prot 0x7
+[  4.772908 rt_tour_4_3::userboot:25] Map user page: 0x1000 ok!
+[  4.773560 rt_tour_4_3::userboot:30] App code: [2, 144, 147, 8, 240, 3, 115, 0, ... ...]
+[  4.776418 rt_tour_4_3:56] Wander kernel-thread is running ..
+[  4.776910 task:145] alloc_mm...
+[  4.777227 page_table::paging:77] CLONE: from 0xFFFFFFC0802B9000 => 0xFFFFFFC0803A5000
+[  4.778295 mmap:138] mmap va 0x1000 offset 0x0 flags 0x10 prot 0x7
+[  4.778896 mmap:187] mmap region: 0x1000 - 0x2000, vm_flags: 0x7, prot 0x7
 ```
 
-预期输出：
+第5~6行：应用进程在自己的地址空间映射0x1000开始的区域，并加载应用。
+
+第12~13行：Wanderer内核线程在自己的地址空间中映射0x1000开始的区域，并进行覆写。
+
+由于分属不同的地址空间，二者之间不冲突。
+
+
 
 在指定的mm地址空间中记录映射区域，并在对应页表中产生映射项。
 
 ### 第六节 实验4.4 - 进程级文件操作fileops
 
 <img src="./README.assets/image-20240624112724333.png" alt="image-20240624112724333" style="zoom:80%;" />
-
-实验操作：
-
-```sh
-lk chroot rt_fstree
-lk prepare
-lk run
-```
-
-预期输出：
-
-```sh
-[  0.138114 axfs_vfs:256] ============== mount ...
-[  0.138519 axmount::fs::fatfs:140] create Dir at fatfs: /sys
-[  0.140492 axmount::fs::fatfs:120] lookup at fatfs: /sys
-[  0.142422 target:140] Is a directory
-[  0.145452 rt_fstree:20] cwd: /
-[  0.145889 rt_fstree:22] [rt_fstree]: ok!
-```
 
 
 
@@ -1736,6 +1842,22 @@ lk run
 ```
 
 屏幕输出：
+
+```sh
+[  4.521719 rt_tour_4_4:39] App kernel-thread load ..
+[  4.522324 fileops:436] do_open path /sbin/origin.bin
+[  4.529043 run_queue::run_queue:75] state: Running
+[  4.530032 rt_tour_4_4:56] Wander kernel-thread is running ..
+[  4.530521 task:145] alloc_mm...
+[  4.530844 page_table::paging:77] CLONE: from 0xFFFFFFC0802B9000 => 0xFFFFFFC0803A2000
+[  4.532177 mmap:138] mmap va 0x1000 offset 0x0 flags 0x10 prot 0x7
+[  4.533400 mmap:187] mmap region: 0x1000 - 0x2000, vm_flags: 0x7, prot 0x7
+[  4.534465 mmap:288] --------- faultin_page... va 0x1000 cause 0
+[  4.535080 run_queue::run_queue:75] state: Running
+[  4.536312 rt_tour_4_4::userboot:19] read origin.bin: size [34]
+```
+
+第2行：进程从管理的文件系统树中查找并打开文件。
 
 
 
@@ -1779,6 +1901,19 @@ lk run
 
 屏幕输出：
 
+```sh
+[  0.122519 fileops:436] do_open path /sbin/init
+[  0.128761 rt_tour_5_1:35] e_entry: 0x5B0
+[  0.129522 rt_tour_5_1:45] phoff: 0x40
+[  0.131016 rt_tour_5_1:55] phdr: offset: 0x270=>0x270 size: 0x21=>0x21
+[  0.131584 rt_tour_5_1:55] phdr: offset: 0x0=>0x0 size: 0x7CC=>0x7CC
+[  0.132130 rt_tour_5_1:55] phdr: offset: 0xDF8=>0x1DF8 size: 0x258=>0x260
+[  0.132776 rt_tour_5_1:61] [rt_tour_5_1]: ok!
+[  0.133326 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+
+
 
 
 ### 第四节 实验5.2 - 准备用户应用地址空间
@@ -1804,11 +1939,23 @@ lk run
 
 屏幕输出：
 
+```sh
+[  4.223112 rt_tour_5_2:36] Reach here! entry: 0x3FF7FEE5A4; sp: 0x3FFFFFFEF0
+[  4.223809 rt_tour_5_2:19] [rt_tour_5_2]: ok!
+[  4.224396 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+
+
 
 
 ### 第五节 实验5.3 - 特权级切换启动应用
 
 XXX
+
+
+
+<img src="./README.assets/image-20240701142424963.png" alt="image-20240701142424963" style="zoom:80%;" />
 
 实验步骤：
 
@@ -1819,6 +1966,23 @@ lk run
 ```
 
 屏幕输出：
+
+```sh
+[  0.210850 bprm_loader:533] stack sp 0x3ffffffed0
+[  0.212026 exec:23] start thread entry [0x3ff7fee5a4] ...
+[  0.213064 rt_tour_5_3::trap::irq:15] ==> Got irq[S_TIMER]
+[  0.213986 rt_tour_5_3::trap:28] No Trap handler! Exception(InstructionPageFault) @ 0x3ff7fee5a4
+[  0.215187 rt_tour_5_3::trap:29] [rt_tour_5_3]: ok!
+[  0.215889 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+第2行：准备从内核切换到应用入口的切换点，应用入口地址0x3ff7fee5a4。
+
+第4行：开始执行应用入口指令（地址0x3ff7fee5a4），但是触发异常，此时还没有为内核启用异常处理和系统调用。
+
+实验的输出证明，特权级切换进入应用入口成功。
+
+下一节，我们将支持系统调用和异常处理，宏内核将可以完整的启动首个用户应用。
 
 
 
@@ -1835,6 +1999,17 @@ lk run
 ```
 
 屏幕输出：
+
+```sh
+[userland]: Hello, Init! Sqrt(1048577) = 35190
+[  7.596115 axtrap::arch::riscv:90] Syscall: 0x5e, 94, 0x3ff7f3c0fc
+[  7.596765 sys:268] exit_group ... [0]
+[  7.600004 sys:307] do_task_dead ... tid 1
+[  7.600505 sys:313] InitTask[1] exits normally ...
+[  7.601062 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
+```
+
+
 
 
 
