@@ -2198,7 +2198,7 @@ lk run
 
 第7行：应用代码没有受到破坏，因为两个线程的页表是相互独立的。
 
-本节建立了多页表机制，目前内核的多页表和多线程支持都已经具备，下节来支持进程的概念。
+本节建立了多页表机制，目前内核的多页表和多线程支持都已经具备，下节来让我们实验的宏内核能够支持进程的概念。
 
 
 
@@ -2284,11 +2284,36 @@ lk run
 
 ### 第五节 实验4.3 - 地址空间映射mmap
 
-本节目标：
+本节目标：实现用户态地址空间的映射，并为将来SYSCALL_MMAP的支持做准备。本节实验中，会把原来直接对根页表建立映射的方式替换为调用mmap的高级方式。
+
+mmap直接操作的目标是代表用户空间的mm对象，每一个用户态进程有一个mm，它维护着若干的地址区域vma。vma记录mm地址空间中映射区域的起始位置、操作权限和用途标志等等。
+
+如下图是一个典型的mm空间的布局，各个vma大致对应应用的各个segment，主要包括代码段、数据段、BSS段和用户栈。在此基础上，应用的运行过程中，可能会动态的增加和取消区域映射。以上都是mmap的工作。
 
 <img src="./README.assets/image-20240702000248201.png" alt="image-20240702000248201" style="zoom:80%;" />
 
-实验步骤：
+本节的实验内容，把原来直接操作页表的映射方式改为mmap，保持最终运行结果不变：
+
+```rust
+pub fn load() {
+	... ...
+    let prot = PROT_READ | PROT_WRITE | PROT_EXEC;
+    let _ = mmap::_mmap(USER_APP_ENTRY.into(), PAGE_SIZE_4K, prot, MAP_FIXED, None, 0);
+    mmap::faultin_page(USER_APP_ENTRY, 0);
+    info!("Map user page: {:#x} ok!", USER_APP_ENTRY);
+
+    let run_code = unsafe { core::slice::from_raw_parts_mut(USER_APP_ENTRY as *mut u8, size) };
+    run_code.copy_from_slice(&load_code);
+
+    info!("App code: {:?}", &run_code[0..size]);
+}
+```
+
+第3~5行：采取了mmap的方式映射地址空间，后面的操作不变，写入应用程序代码并打印，确认区域映射的有效性。
+
+
+
+看一下具体的实验过程：
 
 ```sh
 lk chroot rt_tour_4_3
@@ -2320,17 +2345,40 @@ lk run
 
 由于分属不同的地址空间，二者之间不冲突。
 
-
-
-在指定的mm地址空间中记录映射区域，并在对应页表中产生映射项。
-
-### 第六节 实验4.4 - 进程级文件操作fileops
-
-<img src="./README.assets/image-20240624112724333.png" alt="image-20240624112724333" style="zoom:80%;" />
+本节解决了管理进程地址空间的问题，下节来处理进程资源管理中的另一个重要方面 - 文件系统和文件操作。
 
 
 
-实验步骤：
+### 第六节 实验4.4 - 文件系统和文件操作
+
+本节目标：通过本进程的fs和fdtable访问文件，fileops封装了这类文件相关的操作。本节实验直接调用它来替换原始的文件操作方式。
+
+从进程角度，主要从两个层面对文件进行管理：
+
+1. 文件系统视图：整个宏内核系统维护一棵完整的文件系统树，可能由若干个文件系统通过mount拼接而成。每个结点代表一个inode（可认为是低级语义的文件或者视为文件后备信息）。对于**进程**，它的fs成员是对整个文件树建立的一个有限的视图。fs.root指向在视图范围中的根结点，fs.curr指向当前结点。fs.root限制了进程对文件系统树的可见范围，通过chroot等操作可以调整该范围。进程对文件操作的起点可以是fs.root即“/”，也可以是fs.curr即“.”，经由lookup过程按照路径找到目标文件对应的inode结点。
+2. 文件描述符表：进程对于打开的文件会把它记录到fdtable中，对应的索引作为描述符返回给用户态应用。即应用看不到实际的文件指针或引用，只能通过fd间接的请求对文件的操作。
+
+<img src="./README.assets/image-20240702082707681.png" alt="image-20240702082707681" style="zoom:80%;" />
+
+文件系统视图和文件描述符表为进程对文件的访问建立了中间层，可以为权限管理、命名空间隔离、资源共享等方面带来便利。
+
+组件仓库中提供了fileops，为当前进程访问文件的操作提供了封装。本节实验通过它来替换原来的文件操作方式：
+
+```rust
+// rt_tour_4_4/src/userboot.rs
+pub fn load() {
+    let fname = "/sbin/origin.bin";
+    let file = fileops::do_open(fname, 0).unwrap();
+
+    let mut load_code: [u8; 256] = [0; 256];
+    let size = file.lock().read(&mut load_code).unwrap();
+    info!("read origin.bin: size [{}]", size);
+	... ...
+    info!("App code: {:?}", &run_code[0..size]);
+}
+```
+
+具体的实验步骤：
 
 ```sh
 lk chroot rt_tour_4_4
@@ -2356,11 +2404,13 @@ lk run
 
 第2行：进程从管理的文件系统树中查找并打开文件。
 
+如此，对文件的访问也提升到了进程的层面。
+
 
 
 ### 本章总结
 
-XXX
+本次迭代建立了多地址空间，更重要的是，引入了进程这一重要抽象。宏内核可以从进程的角度，来对各类系统资源进行隔离和共享，为下一章兼容Linux的应用运行环境准备了基础。
 
 
 
@@ -2386,9 +2436,75 @@ XXX
 
 ### 第三节 实验5.1 - 解析ELF格式文件
 
-XXX
+本节目标：引入ELF解析器，对一个普通的Linux ELF格式应用程序进行解析实验。
 
-实验步骤：
+> 从本章本节开始，不再需要origin.bin那个临时的实验应用。后面的实验直接用Linux的原始应用，并在文件系统预装应用依赖的glibc的各个库。
+
+
+
+先来看一下我们准备实验的目标ELF文件的格式：
+
+```sh
+riscv64-linux-gnu-readelf -lW ./btp/build/riscv64/sbin/init
+```
+
+显示如下的信息：
+
+```sh
+Elf file type is DYN (Position-Independent Executable file)
+Entry point 0x5b0
+There are 10 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x000230 0x000230 R   0x8
+  INTERP         0x000270 0x0000000000000270 0x0000000000000270 0x000021 0x000021 R   0x1
+      [Requesting program interpreter: /lib/ld-linux-riscv64-lp64d.so.1]
+  RISCV_ATTRIBUT 0x00107b 0x0000000000000000 0x0000000000000000 0x000033 0x000000 R   0x1
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x0007cc 0x0007cc R E 0x1000
+  LOAD           0x000df8 0x0000000000001df8 0x0000000000001df8 0x000258 0x000260 RW  0x1000
+  DYNAMIC        0x000e10 0x0000000000001e10 0x0000000000001e10 0x0001f0 0x0001f0 RW  0x8
+  NOTE           0x000294 0x0000000000000294 0x0000000000000294 0x000044 0x000044 R   0x4
+  GNU_EH_FRAME   0x000788 0x0000000000000788 0x0000000000000788 0x000014 0x000014 R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10
+  GNU_RELRO      0x000df8 0x0000000000001df8 0x0000000000001df8 0x000208 0x000208 R   0x1
+```
+
+ELF文件中标记了各个段的位置信息、操作权限等。我们的实验主要关注以下几个部分：
+
+第2行：Entry point，应用的入口地址，本章最后利用它来跳转到应用中运行。
+
+第8~9行：本应用的解释器。这个应用是动态链接方式建立的，当执行它时，实际执行的是解释器/lib/ld-linux-riscv64-lp64d.so.1。
+
+第11~12行：这两个段的Type标记了LOAD，表示它们需要被加载到内存中，它们依次分别是代码段和数据段。
+
+
+
+本节的实验内容，直接在宏内核中解析上述信息并打印到屏幕：
+
+```rust
+#[no_mangle]
+pub extern "Rust" fn runtime_main(cpu_id: usize, dtb_pa: usize) {
+    file.read(&mut buf).unwrap();
+    let ehdr = ElfBytes::<AnyEndian>::parse_elf_header(&buf[..]).unwrap();
+    info!("e_entry: {:#X}", ehdr.e_entry);
+	... ...
+    let mut buf: [u8; 2 * 1024] = [0; 2 * 1024];
+    let _ = file.seek(SeekFrom::Start(phoff));
+    file.read(&mut buf).unwrap();
+    let phdrs = SegmentTable::new(ehdr.endianness, ehdr.class, &buf[..]);
+
+    for phdr in phdrs {
+        if phdr.p_type != PT_LOAD && phdr.p_type != PT_INTERP {
+            continue;
+        }
+		... ...
+    }
+    ... ...
+}
+```
+
+具体的实验步骤：
 
 ```sh
 lk chroot rt_tour_5_1
@@ -2409,24 +2525,40 @@ lk run
 [  0.133326 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
+正常打印出了应用的入口地址，以及代码段、数据段和INTERP段的位置，证明解析成功。
 
+下一节基于该成果，来为应用的启动准备地址空间。
 
 
 
 ### 第四节 实验5.2 - 准备用户应用地址空间
 
+本节目标：在应用线程中新建mm地址空间，基于ELF解析的结果加载应用各个段，提供应用入口地址，准备启动。
+
+准备工作主要可以分为以下三步：
+
 <img src="./README.assets/image-20240624105611245.png" alt="image-20240624105611245" style="zoom:80%;" />
 
-leader组件bprm_loader基于应用程序重置当前进程的地址空间。在四个子系统配合下完成工作。
+1. 在当前线程中，通过alloc_mm建立新的独立地址空间，即，本线程下步将成为这个应用的运行进程。
+2. 解析ELF格式信息，向地址空间中映射和加载必要的段。这将基于上节实验的内容。
+3. 分配并初始化用户栈，传递应用入口地址，用于设置返回上下文。
 
-1. 通过fileops打开和读应用程序。
-2. 通过elf解析应用程序文件头信息和各段信息。
-3. 通过mmap把标记为LOAD的各段映射到当前进程地址空间的指定位置。
-4. 通过userstack构造用户栈，映射到当前进程的地址空间。
+在之前的各项实验中，已经为这些工作准备了基础，本节实验主要是把它们组合起来完成目标。组件仓库中已经封装了一个专门组件bprm_loader，用于执行上述动作，我们可以先基于它完成本节实验，在通过对它的改造来进行额外的练习。
 
+```rust
+pub fn start(_cpu_id: usize, _dtb: usize) {
+    let filename = "/sbin/init";
+    let args = vec![filename.into()];
+    let (entry, sp) = bprm_loader::execve(filename, 0, args, vec![]).unwrap();
 
+    // Todo: check entry and sp for ld.so
+    info!("Reach here! entry: {:#X}; sp: {:#X}", entry, sp);
+}
+```
 
-实验步骤：
+第11行：调用bprm_loader的execve方法建立新的地址空间。
+
+具体实验步骤：
 
 ```sh
 lk chroot rt_tour_5_2
@@ -2442,21 +2574,38 @@ lk run
 [  4.224396 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
-
+从第1行看到，我们已经获得了应用的入口地址，并建立了用户栈。完成了准备地址空间这个阶段性目标，下一节来完成特权级切换和应用的启动。
 
 
 
 ### 第五节 实验5.3 - 特权级切换启动应用
 
-XXX
+本节目标：从内核态切换到用户态，并启动应用。
+
+到本节为止，我们将完成宏内核的第一个直接子系统userboot的实验工作，userboot负责宏内核从引导到首个应用的启动过程。
 
 <img src="./README.assets/image-20240702000721116.png" alt="image-20240702000721116" style="zoom:80%;" />
 
+目前我们已经前进到最下面那步 switch to userland app。因为前面实验的基础，本节实验内容比较简单：
 
+```rust
+pub fn start(_cpu_id: usize, _dtb: usize) {
+    let filename = "/sbin/init";
 
-<img src="./README.assets/image-20240701142424963.png" alt="image-20240701142424963" style="zoom:80%;" />
+    let argv_init: Vec<String> = vec![filename.into()];
+    let envp_init: Vec<String> = vec!["HOME=/".into(), "TERM=linux".into()];
+    let _ = exec::kernel_execve(filename, argv_init, envp_init);
 
-实验步骤：
+    let sp = task::current().pt_regs_addr();
+    axhal::arch::ret_from_fork(sp);
+}
+```
+
+第4~6行：在用户栈上设置初始的参数和环境变量，并准备好返回上下文。其内部还是调用了bprm_loader::execve完成了基础工作。
+
+第8~9行：利用伪造的上下文和sret返回指令，返回到用户态执行应用。具体细节在前面的实验中已经介绍。只是这次我们启动的是Linux的原始应用。
+
+来实际操作一下：
 
 ```sh
 lk chroot rt_tour_5_3
@@ -2479,7 +2628,7 @@ lk run
 
 第4行：开始执行应用入口指令（地址0x3ff7fee5a4），但是触发异常，此时还没有为内核启用异常处理和系统调用。
 
-实验的输出证明，特权级切换进入应用入口成功。
+实验的输出证明，特权级切换进入应用入口成功，只是还缺少系统调用和异常处理的支持。
 
 下一节，我们将支持系统调用和异常处理，宏内核将可以完整的启动首个用户应用。
 
@@ -2487,11 +2636,59 @@ lk run
 
 ### 第六节 实验5.4 - 支持GLibc和应用的系统调用
 
-XXX
+本节目标：引入系统调用、异常和中断处理的子系统trap，完整支持首个用户态应用的启动。
 
 <img src="./README.assets/image-20240701173502749.png" alt="image-20240701173502749" style="zoom: 50%;" />
 
-实验步骤：
+组件仓库中提供了封装上述功能的组件，主要是axtrap和axsyscall，其中axtrap作为顶级组件会自动调用axsyscall。
+
+我们先来基于这些现有组件进行实验。
+
+本节实验涉及的主要入口代码：
+
+```rust
+pub fn init(cpu_id: usize, dtb: usize) {
+    show_logo();
+
+    userboot::init(cpu_id, dtb);
+    axtrap::init(cpu_id, dtb);
+
+    info!(
+        "MacroKernel is starting: Primary CPU {} started, dtb = {:#x}.",
+        cpu_id, dtb
+    );
+}
+
+pub fn start(cpu_id: usize, dtb: usize) {
+    axtrap::start(cpu_id, dtb);
+    userboot::start(cpu_id, dtb);
+}
+
+```
+
+第5行：axtrap的初始化，内部会完成对axsyscall等下层组件的初始工作。
+
+第14行：axtrap的启动，实际内部主要是启用中断。可以去参照查看具体的实验代码。
+
+本节实验的重点是跟踪系统调用的实现，可以通过对照syscall入口的日志来跟踪其调用过程：
+
+```rust
+// axtrap/src/arch/riscv/mod.rs
+fn syscall<F>(tf: &mut TrapFrame, do_syscall: F)
+where
+    F: FnOnce(SyscallArgs, usize) -> usize,
+{
+    warn!("Syscall: {:#x}, {}, {:#x}", tf.regs.a7, tf.regs.a7, tf.sepc);
+    let args = syscall_args(tf);
+    // Note: "tf.sepc += 4;" must be put before do_syscall. Or:
+    // E.g., when we do clone, child task will call clone again
+    // and cause strange behavior.
+    tf.sepc += 4;
+    tf.regs.a0 = do_syscall(args, tf.regs.a7);
+}
+```
+
+具体实验步骤：
 
 ```sh
 lk chroot rt_tour_5_4
@@ -2510,13 +2707,15 @@ lk run
 [  7.601062 axhal::platform::riscv64_qemu_virt::misc:3] Shutting down...
 ```
 
-
+注意第1行，这个信息是Linux的原始应用输出的，在Linux环境下是同样的输出效果，证明首个应用启动成功！
 
 
 
 ### 本章总结
 
-XXX
+通过本次迭代，我们已经建立了典型宏内核系统，同时它可以兼容支持Linux的原始Glibc应用。但是在功能和性能方面，内核还有很多需要改进的地方。
+
+下一章也是最后一章，我们进行一些扩展实验，尝试对该内核进行一些增强和优化。
 
 
 
