@@ -272,7 +272,7 @@ rt_tour_0_1只是在引导完成后启动的一个“空壳”，用于验证系
 第6步是arch_boot与rt_tour_0_1两个组件之间的交界点，标志着引导阶段结束，开始核心代码部分的执行。
 
 ```rust
-//arch_boot/arch_boot/src/platform/riscv64_qemu_virt/mod.rs
+// arch_boot/src/platform/riscv64_qemu_virt/mod.rs
 
 unsafe extern "C" fn rust_entry(cpu_id: usize, dtb: usize) {
     super::clear_bss();
@@ -351,6 +351,11 @@ Priv: 1; Virt: 0
 从日志中0x80200000的那行开始，与arch_boot的启动代码进行对照，可以确认内核完成了引导过程。
 
 通过这个对照过程，可以帮助我们从体系结构层面加深对启动过程的理解。
+
+#### 练习
+
+1. 目前清零BSS的操作是在arch_boot的rust_entry中进行的，这个位置过于靠后。尝试把这个操作前移，放到内核栈建立之后，启用分页之前。提示：可以用原clear_bss函数的实现，也可以改用汇编实现。
+2. 目前runtime_main的实现是直接关机。尝试在关机之前输出一点提示信息。提示：从crates.io 引入sbi-rt这个crate，调用它的legacy::console_putchar方法可以打印字符。可以提前参考下一章实验1.1的实现。
 
 
 
@@ -514,6 +519,10 @@ Logging is enabled.
 
 当前系统已经具备了基于级别打印日志的功能，但是只能输出有限类型的信息。对于String、Vec等复合类型还不能支持，主要原因是当前内核缺乏动态内存分配的功能。下一节就来实现这部分。
 
+#### 练习
+
+1. 改造early_console的write_str方法，把屏幕输出“[rt_tour_1_1]: earlycon!”这一行的显示从黑白改为彩色。提示：参考axlog2实现。
+
 
 
 ### 第四节 实验1.2 - 动态内存分配
@@ -618,6 +627,10 @@ lk run
 ```
 
 本节解决了动态内存分配的问题，为后面内核的开发过程建立了重要基础，下一节来处理内存管理的另一个重要方面 - 分页。
+
+#### 练习
+
+1. 在分配页alloc_pages之后，输出当前内存分配器的可用字节数和可用页数。提示：查看GlobalAllocator的公开方法。
 
 
 
@@ -795,6 +808,10 @@ lk run
 
 到目前为止，实验内核已经具备了一定的基础功能，从下一节开始，我们就来加载应用并切换到用户态运行。
 
+#### 练习
+
+1. 仿照PFlash对头信息magic的输出方式，输出virtio_mmio第一个区域开始的4个字节，该区域的起始物理地址0x10001000。
+
 
 
 ### 第六节 实验1.4 - 从PFlash加载应用
@@ -890,6 +907,10 @@ lk run
 第5行，输出的是用户地址空间0x1000位置的数据，对照我们编译的origin.bin，内容一致，证明应用加载成功。
 
 下一节，我们将实验切换到用户态来执行这个应用origin.bin。
+
+#### 练习
+
+1. 改进PFlash的布局管理方式，可以支持两个payload。第一个仍是应用，第二个是参数，用"drv=pflash"这个固定字符串代替。在上面的实验中把第二个payload的内容也打印出来。提示：最简单的方法，用PayloadHead作为各个payload的分隔，还可以考虑把那个预留的pad利用起来。
 
 
 
