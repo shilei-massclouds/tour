@@ -76,9 +76,13 @@ userboot和trap两个子系统由更小一级规模的子系统构成，直至�
 
 #### 建立实验环境
 
-目前本指导书的所有实验基于Ubuntu22.04 LTS - X86_64的系统环境。可以基于物理机或WSL2。
+目前本指导书的所有实验基于如下环境：
 
-> 如果选用其它Linux发行版或Ubuntu的其它版本，实验过程中可能会发生意外情况。建议遵循上述环境要求。
+- `Ubuntu22.04 LTS - X86_64` （可以基于物理机或WSL2）
+- `qemu 7.1.0`
+- `rust-toolchain nightly-2024-01-18` 
+
+> 选用其它版本可能会导致实验代码编译、运行结果不符合预期，建议按上述环境要求配置。
 
 
 
@@ -98,13 +102,26 @@ userboot和trap两个子系统由更小一级规模的子系统构成，直至�
    cargo install cargo-binutils
    ```
 
-3. Qemu 模拟器（RiscV64）
+3. Qemu 模拟器（RISC-V64）
 
    ```sh
-   sudo apt install qemu-system-riscv64
+   wget https://download.qemu.org/qemu-7.1.0.tar.xz
+   tar xvJf qemu-7.1.0.tar.xz
+   cd qemu-7.1.0
+   ./configure
+   ./configure --target-list=riscv64-softmmu,riscv64-linux-user
+    make -j$(nproc)
+   ```
+   之后可以在同目录下 `sudo make install` 将 Qemu 安装到 `/usr/local/bin` 目录中，也可自行将 `qemu-7.1.0/build/` 之下的目录加入 PATH 环境变量中。
+
+   之后可通过以下命令确认 Qemu 的版本及安装情况
+
+   ```sh
+   qemu-system-riscv64 --version
+   qemu-riscv64 --version
    ```
 
-4. RiscV 工具集
+4. RISC-V 工具集
 
    ```sh
    sudo apt install binutils-riscv64-unknown-elf
@@ -136,7 +153,7 @@ userboot和trap两个子系统由更小一级规模的子系统构成，直至�
    alias lk='lktool'
    ```
 
-   > 注意：需要把/home/cloud/gitWork/lktool替换为实际路径
+   > 注意：需要把 `/home/cloud/gitWork/lktool` 替换为你下载的 `lktool` 的实际路径
 
 
 
@@ -150,7 +167,7 @@ lk config riscv64
 
 
 
-对指导书宏的所有实验，都遵循如下操作步骤：
+对指导书中的所有实验，都遵循如下操作步骤：
 
 ```sh
 lk chroot rt_tour_X_X
@@ -158,11 +175,11 @@ lk prepare
 lk run
 ```
 
-第1行：每一次实验都是在构建一个可以独立运行的内核系统。如前述，核心组件rt_tour_X_X代表它对应的特定实验，命名中的X_X就是实验编号。如rt_tour_0_1对应本章实验0.1。
+- `lk chroot rt_tour_X_X` 为实验 `X_X` 构建一个可以独立运行的内核系统。如前述，核心组件 rt_tour_X_X 代表它对应的特定实验，命名中的 X_X 就是实验编号。如 rt_tour_0_1 对应本章实验0.1。
 
-第2行：部分实验需要一些前置条件，比如可能需要构建一个磁盘系统或提供具体的文件系统作为数据源。这些通过prepare自动建立，所以建议每个实验中都默认执行这一步。不需要额外准备的，该步骤是空操作。
+- `lk prepare` 是预处理操作，比如一些实验可能需要构建一个磁盘系统或提供具体的文件系统作为数据源。这些通过prepare自动建立，所以建议每个实验中都默认执行这一步。不需要额外准备的，该步骤是空操作。
 
-第3行：正式运行实验，并观察结果。
+- `lk run` 运行实验，并观察结果。
 
 
 
