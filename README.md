@@ -76,7 +76,7 @@ userboot和trap两个子系统由更小一级规模的子系统构成，直至�
 
 #### 建立实验环境
 
-目前本指导书的所有实验基于Ubuntu22.04 LTS - X86_64的系统环境。可以基于物理机或WSL2。
+目前本指导书的所有实验基于Ubuntu22.04 LTS和Ubuntu24.04 LTS的系统环境。可以基于物理机或WSL2。
 
 > 如果选用其它Linux发行版或Ubuntu的其它版本，实验过程中可能会发生意外情况。建议遵循上述环境要求。
 
@@ -88,7 +88,8 @@ userboot和trap两个子系统由更小一级规模的子系统构成，直至�
    sudo apt install autoconf automake autotools-dev curl libmpc-dev libmpfr-dev \
        libgmp-dev gawk build-essential bison flex texinfo gperf libtool \
        patchutils bc zlib1g-dev libexpat-dev pkg-config  libglib2.0-dev \
-       libpixman-1-dev libsdl2-dev git tmux python3 python3-pip ninja-build
+       libpixman-1-dev libsdl2-dev git tmux python3 python3-pip ninja-build \
+       gcc-riscv64-linux-gnu dosfstools
    ```
 
 2. Rust 开发环境
@@ -110,7 +111,14 @@ userboot和trap两个子系统由更小一级规模的子系统构成，直至�
    sudo apt install binutils-riscv64-unknown-elf
    ```
 
+5. 检查cargo配置，确保在当前用户的主目录下有配置文件，即~/.cargo/config.toml，且其中内容有：
 
+   ```shell
+   [net]
+   git-fetch-with-cli = true
+   ```
+
+   
 
 #### 实验工程和lktool工具
 
@@ -118,7 +126,7 @@ userboot和trap两个子系统由更小一级规模的子系统构成，直至�
 
    ```sh
    git clone git@github.com:shilei-massclouds/lkmodel.git
-   git checkout tour
+   git switch tour
    ```
 
 2. 编译lktool工具
@@ -136,9 +144,15 @@ userboot和trap两个子系统由更小一级规模的子系统构成，直至�
    alias lk='lktool'
    ```
 
-   > 注意：需要把/home/cloud/gitWork/lktool替换为实际路径
+   > 注意：需要把/home/cloud/gitWork/lkmodel替换为实际路径。
 
+   可以把上述设置写入~/.bashrc，以持久生效。
 
+   >  注意：有些环境安装不完整，写入~/.bashrc不生效。
+   >
+   > 那么尝试直接写入~/.profile。
+
+   
 
 #### 实验基本操作步骤
 
@@ -2778,3 +2792,4 @@ XXX
 
 XXX
 
+​	
